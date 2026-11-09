@@ -181,6 +181,8 @@ func schemaKeyFromTableKey(dbKey tables.TableKey) schemas.Key {
 		Weight:                 getWeight(dbKey.Weight),
 		Enabled:                dbKey.Enabled,
 		UseForBatchAPI:         dbKey.UseForBatchAPI,
+		UseForEvals:            dbKey.UseForEvals,
+		EvalConcurrency:        dbKey.EvalConcurrency,
 		UseAnthropicEndpoints:  dbKey.UseAnthropicEndpoints,
 		UseOpenAIEndpoints:     dbKey.UseOpenAIEndpoints,
 		DisableContentLogging:  dbKey.DisableContentLogging,
@@ -217,6 +219,8 @@ func tableKeyFromSchemaKey(provider tables.TableProvider, key schemas.Key) (tabl
 		Weight:                 &key.Weight,
 		Enabled:                key.Enabled,
 		UseForBatchAPI:         key.UseForBatchAPI,
+		UseForEvals:            key.UseForEvals,
+		EvalConcurrency:        key.EvalConcurrency,
 		UseAnthropicEndpoints:  key.UseAnthropicEndpoints,
 		UseOpenAIEndpoints:     key.UseOpenAIEndpoints,
 		DisableContentLogging:  key.DisableContentLogging,
@@ -873,6 +877,8 @@ func (s *RDBConfigStore) UpdateProvidersConfig(ctx context.Context, providers ma
 				Weight:                 &key.Weight,
 				Enabled:                key.Enabled,
 				UseForBatchAPI:         key.UseForBatchAPI,
+				UseForEvals:            key.UseForEvals,
+				EvalConcurrency:        key.EvalConcurrency,
 				UseAnthropicEndpoints:  key.UseAnthropicEndpoints,
 				UseOpenAIEndpoints:     key.UseOpenAIEndpoints,
 				DisableContentLogging:  key.DisableContentLogging,
@@ -965,6 +971,14 @@ func (s *RDBConfigStore) UpdateProvidersConfig(ctx context.Context, providers ma
 				if dbKey.Enabled == nil {
 					dbKey.Enabled = existingKey.Enabled // Keep the stored value unless the file sets enabled
 				}
+				// The eval mark and its concurrency are set in the UI. A file that says nothing
+				// about them keeps what is stored, or the mark would be lost on every start.
+				if dbKey.UseForEvals == nil {
+					dbKey.UseForEvals = existingKey.UseForEvals
+				}
+				if dbKey.EvalConcurrency == nil {
+					dbKey.EvalConcurrency = existingKey.EvalConcurrency
+				}
 				dbKey.Status = existingKey.Status                     // Preserve status (UI-managed)
 				dbKey.Description = existingKey.Description           // Preserve description (UI-managed)
 				dbKey.EncryptionStatus = existingKey.EncryptionStatus // Preserve encryption status
@@ -982,6 +996,13 @@ func (s *RDBConfigStore) UpdateProvidersConfig(ctx context.Context, providers ma
 					dbKey.ProviderID = existingKey.ProviderID // Preserve the existing ProviderID
 					if dbKey.Enabled == nil {
 						dbKey.Enabled = existingKey.Enabled // Keep the stored value unless the file sets enabled
+					}
+					// Same as above: an unset eval mark or concurrency keeps the stored value.
+					if dbKey.UseForEvals == nil {
+						dbKey.UseForEvals = existingKey.UseForEvals
+					}
+					if dbKey.EvalConcurrency == nil {
+						dbKey.EvalConcurrency = existingKey.EvalConcurrency
 					}
 					dbKey.Status = existingKey.Status                     // Preserve status (UI-managed)
 					dbKey.Description = existingKey.Description           // Preserve description (UI-managed)
@@ -1174,6 +1195,8 @@ func (s *RDBConfigStore) UpdateProvider(ctx context.Context, provider schemas.Mo
 			Weight:                 &key.Weight,
 			Enabled:                key.Enabled,
 			UseForBatchAPI:         key.UseForBatchAPI,
+			UseForEvals:            key.UseForEvals,
+			EvalConcurrency:        key.EvalConcurrency,
 			UseAnthropicEndpoints:  key.UseAnthropicEndpoints,
 			UseOpenAIEndpoints:     key.UseOpenAIEndpoints,
 			DisableContentLogging:  key.DisableContentLogging,
@@ -1346,6 +1369,8 @@ func (s *RDBConfigStore) AddProvider(ctx context.Context, provider schemas.Model
 			Weight:                 &key.Weight,
 			Enabled:                key.Enabled,
 			UseForBatchAPI:         key.UseForBatchAPI,
+			UseForEvals:            key.UseForEvals,
+			EvalConcurrency:        key.EvalConcurrency,
 			UseAnthropicEndpoints:  key.UseAnthropicEndpoints,
 			UseOpenAIEndpoints:     key.UseOpenAIEndpoints,
 			DisableContentLogging:  key.DisableContentLogging,
