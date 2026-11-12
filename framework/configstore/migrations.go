@@ -623,6 +623,7 @@ var configstoreMigrationSteps = []migrationStep{
 	{IDs: []string{"add_evals_dataset_folder_parent"}, run: migrationAddEvalsDatasetFolderParent},
 	{IDs: []string{"add_evals_dataset_files"}, run: migrationAddEvalsDatasetFiles},
 	{IDs: []string{"add_evals_run_tables"}, run: migrationAddEvalsRunTables},
+	{IDs: []string{"add_tracing_tables"}, run: migrationAddTracingTables},
 }
 
 // warpLogEmbeddingColumns are the semantic-search configuration columns added
@@ -18205,6 +18206,21 @@ func migrationAddWarpVirtualKeyIDColumn(ctx context.Context, db *gorm.DB, logger
 		Rollback: func(tx *gorm.DB) error {
 			// Reversible: without the column such a caller's calls carry no credential, as before.
 			return dropColumnIfExists(tx.WithContext(ctx), logger, &tables.TableWarpConfig{}, "virtual_key_id")
+		},
+	})
+}
+
+// migrationAddTracingTables creates the Tracing project and tracing key tables. Both are new, so
+// the migration takes no lock on an existing table.
+func migrationAddTracingTables(ctx context.Context, db *gorm.DB, logger schemas.Logger) error {
+	migrationName := "add_tracing_tables"
+	return RunSingleMigration(ctx, nil, db, logger, &migrator.Migration{
+		ID: migrationName,
+		Migrate: func(tx *gorm.DB) error {
+			return tx.WithContext(ctx).AutoMigrate(&tables.TableTraceProject{}, &tables.TableTracingKey{})
+		},
+		Rollback: func(*gorm.DB) error {
+			return fmt.Errorf("%s is non-rollbackable: dropping the tracing tables would permanently delete projects and revoke every tracing key", migrationName)
 		},
 	})
 }
