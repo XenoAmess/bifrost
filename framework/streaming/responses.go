@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -24,6 +25,7 @@ func deepCopyResponsesStreamResponse(original *schemas.BifrostResponsesStreamRes
 	copy := &schemas.BifrostResponsesStreamResponse{
 		Type:           original.Type,
 		SequenceNumber: original.SequenceNumber,
+		EventID:        original.EventID,
 		ExtraFields:    original.ExtraFields, // ExtraFields can be safely shared as they're typically read-only
 	}
 
@@ -732,6 +734,25 @@ type respMsgAccum struct {
 	encrypted   *strings.Builder         // reasoning encrypted content
 }
 
+// keepStreamedMedia adds to message, built from its deltas, the media blocks of the finished item, which have
+// no delta event. They go after the blocks the deltas own, whose builders address them by index.
+func keepStreamedMedia(message *schemas.ResponsesMessage, item *schemas.ResponsesMessage) {
+	if item.Content == nil || message.Content == nil {
+		return
+	}
+	isMedia := func(b schemas.ResponsesMessageContentBlock) bool {
+		return b.ResponsesInputMessageContentBlockImage != nil || b.ResponsesInputMessageContentBlockFile != nil || b.Audio != nil
+	}
+	if slices.ContainsFunc(message.Content.ContentBlocks, isMedia) {
+		return
+	}
+	for _, block := range item.Content.ContentBlocks {
+		if isMedia(block) {
+			message.Content.ContentBlocks = append(message.Content.ContentBlocks, block)
+		}
+	}
+}
+
 // buildCompleteMessageFromResponsesStreamChunks builds complete messages from accumulated chunks.
 func (a *Accumulator) buildCompleteMessageFromResponsesStreamChunks(chunks []*ResponsesStreamChunk) []schemas.ResponsesMessage {
 	return BuildResponsesMessagesFromChunks(chunks)
@@ -840,9 +861,12 @@ func BuildResponsesMessagesFromChunks(chunks []*ResponsesStreamChunk) []schemas.
 					}
 					if accums[i] == nil {
 						messages[i] = deepCopyResponsesMessage(*resp.Item)
-					} else if resp.Item.Status != nil {
-						status := *resp.Item.Status
-						messages[i].Status = &status
+					} else {
+						if resp.Item.Status != nil {
+							status := *resp.Item.Status
+							messages[i].Status = &status
+						}
+						keepStreamedMedia(&messages[i], resp.Item)
 					}
 					matched = true
 					break
