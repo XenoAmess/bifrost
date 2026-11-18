@@ -34,6 +34,8 @@ const (
 	RawResponseFormatCohereChatStreamEvent RawResponseFormat = "cohere.chat.stream_event"
 	// RawResponseFormatGeminiStreamChunk is one Gemini generateContent stream chunk.
 	RawResponseFormatGeminiStreamChunk RawResponseFormat = "gemini.generate_content.chunk"
+	// RawResponseFormatGeminiInteractionsStreamEvent is the JSON data of one Gemini Interactions API stream event.
+	RawResponseFormatGeminiInteractionsStreamEvent RawResponseFormat = "gemini.interactions.stream_event"
 	// RawResponseFormatReplicateStreamEvent is one Replicate prediction stream event encoded as {"Data","Event","ID"}.
 	RawResponseFormatReplicateStreamEvent RawResponseFormat = "replicate.stream_event"
 )
@@ -72,6 +74,10 @@ type rawTextLayout struct {
 	// objects returns the raw paths in one frame that hold tool-call arguments as JSON objects rather than text;
 	// an arguments edit replaces the object equal to its original value. nil means arguments are text.
 	objects func(frame []byte) []string
+	// whole returns the raw paths in one frame that hold a finished response's text, for a closing event that
+	// may or may not list it. An edit to the normalized response's output rewrites every one equal to its
+	// original text; a frame listing none is left alone.
+	whole func(frame []byte) []string
 }
 
 // rawTextFormat describes one declared format: a layout for each normalized payload type its raw payload can back,
@@ -101,6 +107,11 @@ var rawTextFormats = map[RawResponseFormat]rawTextFormat{
 	RawResponseFormatCohereChatStreamEvent:        eventFormat(rawTextLayout{carries: isStreamedTextPath, slots: cohereTextSlots}, true),
 	RawResponseFormatGeminiStreamChunk:            eventFormat(rawTextLayout{carries: isStreamedTextPath, slots: geminiTextSlots, objects: geminiArgumentObjects}, false),
 	RawResponseFormatReplicateStreamEvent:         eventFormat(rawTextLayout{carries: isStreamedTextPath, slots: replicateTextSlots}, true),
+	// Interactions events back Responses chunks only. Their text streams in step.start and step.delta events;
+	// a completion can list the steps again.
+	RawResponseFormatGeminiInteractionsStreamEvent: {layouts: map[rawPayloadKind]rawTextLayout{
+		rawPayloadResponses: {carries: isStreamedTextPath, slots: geminiInteractionsTextSlots, objects: geminiInteractionsArgumentObjects, whole: geminiInteractionsWholeTextSlots},
+	}, deltaOnly: true},
 }
 
 // eventFormat is a provider event format whose one layout serves every payload type, since the same provider events
@@ -388,6 +399,9 @@ func (f *rawJSONFrames) apply(edit RawTextEdit, layout rawTextLayout) error {
 	if layout.objects != nil && isArgumentsPath(edit.Path) {
 		return f.applyObjects(edit, layout.objects)
 	}
+	if layout.whole != nil && isResponseOutputTextPath(edit.Path) {
+		return f.applyWhole(edit, layout.whole)
+	}
 	if layout.carries != nil && !layout.carries(edit.Path) {
 		// Reasoning these provider events do carry is never mirrored, so a change to it is unsupported rather than
 		// reported as synced while the raw event still holds the original.
@@ -516,6 +530,34 @@ func (f *rawJSONFrames) applyObjects(edit RawTextEdit, objects func(frame []byte
 		}
 	}
 	return nil
+}
+
+// applyWhole rewrites each of a closing event's text fields that equals the edit's original text. Text that is
+// there but does not match could be the text being replaced in another shape, so it is unsupported.
+func (f *rawJSONFrames) applyWhole(edit RawTextEdit, whole func(frame []byte) []string) error {
+	matched, listed := false, false
+	for index := range f.frames {
+		for _, slot := range whole(f.frames[index]) {
+			value := gjson.GetBytes(f.frames[index], slot).String()
+			listed = listed || value != ""
+			if value == "" || value != edit.Before {
+				continue
+			}
+			if err := f.set(index, slot, edit.After); err != nil {
+				return err
+			}
+			matched = true
+		}
+	}
+	if !matched && listed {
+		return fmt.Errorf("%w: raw payload lists response text that %q cannot be matched to", ErrRawResponseTextUnsupported, rawJSONPath(edit.Path))
+	}
+	return nil
+}
+
+// isResponseOutputTextPath reports whether a normalized path is text in a finished response's output.
+func isResponseOutputTextPath(path []string) bool {
+	return len(path) > 3 && path[0] == "response" && path[1] == "output" && path[len(path)-1] == "text"
 }
 
 // isArgumentsPath reports whether a normalized path holds a tool call's arguments: a Chat tool-call delta, or a
@@ -771,14 +813,15 @@ type rawTextMatch struct {
 // tool-call arguments, whether streamed in pieces or repeated whole on a closing event. Reasoning and signature deltas
 // are not collected, since redaction leaves reasoning text alone.
 var rawStreamedTextFields = map[RawResponseFormat]func(frame gjson.Result, pieces rawStreamedPieces){
-	RawResponseFormatOpenAIChatCompletionChunk:    openAIChatStreamedText,
-	RawResponseFormatOpenAITextCompletionChunk:    openAITextStreamedText,
-	RawResponseFormatOpenAIResponsesStreamEvent:   openAIResponsesStreamedText,
-	RawResponseFormatAnthropicMessagesStreamEvent: anthropicStreamedText,
-	RawResponseFormatBedrockConverseStreamEvent:   bedrockStreamedText,
-	RawResponseFormatCohereChatStreamEvent:        cohereStreamedText,
-	RawResponseFormatGeminiStreamChunk:            geminiStreamedText,
-	RawResponseFormatReplicateStreamEvent:         replicateStreamedText,
+	RawResponseFormatOpenAIChatCompletionChunk:     openAIChatStreamedText,
+	RawResponseFormatOpenAITextCompletionChunk:     openAITextStreamedText,
+	RawResponseFormatOpenAIResponsesStreamEvent:    openAIResponsesStreamedText,
+	RawResponseFormatAnthropicMessagesStreamEvent:  anthropicStreamedText,
+	RawResponseFormatBedrockConverseStreamEvent:    bedrockStreamedText,
+	RawResponseFormatCohereChatStreamEvent:         cohereStreamedText,
+	RawResponseFormatGeminiStreamChunk:             geminiStreamedText,
+	RawResponseFormatReplicateStreamEvent:          replicateStreamedText,
+	RawResponseFormatGeminiInteractionsStreamEvent: geminiInteractionsStreamedText,
 }
 
 // RedactRawResponseText applies literal replacements to the text a declared format streams in pieces, so a value
@@ -1100,6 +1143,111 @@ func addWholeStrings(value gjson.Result, pieces rawStreamedPieces) {
 			addWholeStrings(child, pieces)
 			return true
 		})
+	}
+}
+
+// geminiInteractionsDeltaTextPath is the field of a Gemini Interactions step.delta that holds its
+// streamed text: answer text, a thought summary, or a function call's argument fragment. Built-in
+// tool deltas carry whole objects, not streamed text.
+func geminiInteractionsDeltaTextPath(frame gjson.Result) string {
+	if frame.Get("event_type").String() != "step.delta" {
+		return ""
+	}
+	switch frame.Get("delta.type").String() {
+	case "text":
+		return "delta.text"
+	case "thought_summary":
+		return "delta.content.text"
+	case "arguments_delta":
+		if frame.Get("delta.arguments").Type == gjson.String {
+			return "delta.arguments"
+		}
+	}
+	return ""
+}
+
+// geminiInteractionsStepTextPaths are the text fields of the step at path: an answer's text blocks, or a
+// thought's summary.
+func geminiInteractionsStepTextPaths(step gjson.Result, path string) []string {
+	list := ""
+	switch step.Get("type").String() {
+	case "model_output":
+		list = "content"
+	case "thought":
+		list = "summary"
+	default:
+		return nil
+	}
+	var paths []string
+	for i, block := range step.Get(list).Array() {
+		if block.Get("type").String() == "text" && block.Get("text").Type == gjson.String {
+			paths = append(paths, path+"."+list+"."+strconv.Itoa(i)+".text")
+		}
+	}
+	return paths
+}
+
+// geminiInteractionsTextSlots maps a Responses event delta to the step.delta or step.start event backing it.
+// The blocks of a step.start stream as one delta.
+func geminiInteractionsTextSlots(frame []byte, path []string) []string {
+	if len(path) != 1 || path[0] != "delta" {
+		return nil
+	}
+	parsed := gjson.ParseBytes(frame)
+	if slot := geminiInteractionsDeltaTextPath(parsed); slot != "" {
+		return []string{slot}
+	}
+	if parsed.Get("event_type").String() == "step.start" {
+		return geminiInteractionsStepTextPaths(parsed.Get("step"), "step")
+	}
+	return nil
+}
+
+// geminiInteractionsCompletedSteps calls fn with each step a completion lists and its path.
+func geminiInteractionsCompletedSteps(frame []byte, fn func(step gjson.Result, path string)) {
+	parsed := gjson.ParseBytes(frame)
+	if parsed.Get("event_type").String() != "interaction.completed" {
+		return
+	}
+	for i, step := range parsed.Get("interaction.steps").Array() {
+		fn(step, "interaction.steps."+strconv.Itoa(i))
+	}
+}
+
+// geminiInteractionsWholeTextSlots are the text fields of the steps a completion lists.
+func geminiInteractionsWholeTextSlots(frame []byte) []string {
+	var paths []string
+	geminiInteractionsCompletedSteps(frame, func(step gjson.Result, path string) {
+		paths = append(paths, geminiInteractionsStepTextPaths(step, path)...)
+	})
+	return paths
+}
+
+// geminiInteractionsArgumentObjects are the arguments of the function calls a completion lists.
+func geminiInteractionsArgumentObjects(frame []byte) []string {
+	var paths []string
+	geminiInteractionsCompletedSteps(frame, func(step gjson.Result, path string) {
+		if step.Get("type").String() == "function_call" && step.Get("arguments").IsObject() {
+			paths = append(paths, path+".arguments")
+		}
+	})
+	return paths
+}
+
+// geminiInteractionsStreamedText collects each step's streamed text, keyed by step index and kind.
+func geminiInteractionsStreamedText(frame gjson.Result, pieces rawStreamedPieces) {
+	if path := geminiInteractionsDeltaTextPath(frame); path != "" {
+		pieces.add(rawStreamedValue{kind: frame.Get("delta.type").String(), index: rawStreamIndex(frame, "index")}, frame.Get(path))
+		return
+	}
+	if frame.Get("event_type").String() == "step.start" {
+		kind := "text"
+		if frame.Get("step.type").String() == "thought" {
+			kind = "thought_summary"
+		}
+		for _, path := range geminiInteractionsStepTextPaths(frame.Get("step"), "step") {
+			pieces.add(rawStreamedValue{kind: kind, index: rawStreamIndex(frame, "index")}, frame.Get(path))
+		}
 	}
 }
 
