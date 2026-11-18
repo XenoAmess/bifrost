@@ -61,12 +61,6 @@ This Textract relay charges $0.01 to start an analysis and $0.0015 per page when
             "timeout_seconds": 21600,
             "usage": { "units_path": "DocumentMetadata.Pages", "cost_per_unit": 0.0015 }
           }
-        },
-        {
-          "method": "POST",
-          "path": "/",
-          "headers": { "X-Amz-Target": "Textract.Get*" },
-          "billable": false
         }
       ]
     }
@@ -117,11 +111,6 @@ bifrost:
             usage:
               units_path: DocumentMetadata.Pages
               cost_per_unit: 0.0015
-        - method: POST
-          path: /
-          headers:
-            X-Amz-Target: "Textract.Get*"
-          billable: false
 ```
 
 </Tab>
@@ -170,13 +159,19 @@ If a gateway node charges a budget and then cannot save that it did, another nod
 
 The final charge goes to the budgets of the virtual key, team and customer that started the job, even if they changed since. It counts no extra request against rate limits.
 
+## Status checks are free
+
+A caller's own status check is never charged, and needs no route of its own. Bifrost compares each call with the job's status check: the method, the path, the query fields, the fixed headers and the fixed body fields, with any job id in place of `{{job.id}}`. A call that matches, and names a job Bifrost started on that route (still running or already settled, so a caller can keep reading a finished job's results), is relayed free on any route. A made-up id is not a status check, so that call follows the relay's routes and is priced by them. A disabled route still answers `404`, and a job id Bifrost will not follow (see below) does not count either.
+
+Fields the status check does not mention can be anything, so a caller may add its own paging token. A number in a paging field (`MaxResults`, `limit`, `page_size`, `offset` and similar names) may be any number, so `MaxResults: 1` in the status check still matches a caller asking for 1000. Every other number must match exactly, as text does, so a numeric operation code such as `"Action": 1` cannot be swapped for another. A list must have the same number of items, so a batch call cannot carry an extra operation.
+
 ## In Relay Logs
 
-The start call is a row like any other, with its job id and the status `started`. When the job ends, a **job** row is added with the final status, the units and the charge. It links to the start call's row and carries that call's model, route and the names of its virtual key, user, team and project. A job Bifrost could not price still gets its row, with the reason and a blank cost, and nothing is charged.
+The start call is a row like any other, with its job id and the status `started`. When the job ends, a **job** row is added with the final status, the units and the charge. It links to the start call's row and carries that call's model, route and the names of its virtual key, user, team and project, when that row is already stored. Start rows are written in batches, so a job a caller's status check settles within a few seconds of starting may keep only the link. A job Bifrost could not price still gets its row, with the reason and a blank cost, and nothing is charged.
 
 The job row also shows how the job was followed: how many times Bifrost tried a status check (a try skipped because another node held the job counts too), the last job status it read, the HTTP status of the check that ended it, and when it was settled. The replies to those checks are not stored.
 
-A caller's own status check can settle the job too: when its reply shows the job finished, Bifrost charges the job from that reply at once, as it does for a video retrieve, and the job row names that check. Bifrost's own polling stays the backstop, and a job is still charged once whichever check finds it finished first.
+A caller's own status check can also end the wait: when its reply shows the job finished, and the status check is read whole (any route that does not force streaming, including one whose upstream answers with an event stream), Bifrost polls the job itself at once, with the job's stored status check, and charges it from that reply, never from the caller's, so a trimmed or shaped reply cannot change the charge. The job row names the check that triggered it. If Bifrost's poll fails, or the job is past its timeout, the caller's check settles nothing and Bifrost's own polling decides. Bifrost's own polling stays the backstop, and a job is still charged once whichever check finds it finished first.
 
 <Note>
 Jobs are recorded by request logging. With logging off, the start call is still charged its fee, but no job is followed or charged.
