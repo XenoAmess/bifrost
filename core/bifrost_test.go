@@ -5909,6 +5909,67 @@ func TestFallbackKeyPinMatrix(t *testing.T) {
 	}
 }
 
+// TestVertexInteractionsLifecycleKeySelection pins that a call on a stored Vertex run, which names no
+// model to choose a key by, never picks a key whose region cannot serve Interactions while another can.
+// A pinned key and every other request keep the full pool.
+func TestVertexInteractionsLifecycleKeySelection(t *testing.T) {
+	account := NewMockAccount()
+	account.AddProvider(schemas.Vertex, 5, 1000)
+	key := func(id, region string) schemas.Key {
+		return schemas.Key{ID: id, Name: id, Models: schemas.WhiteList{"*"}, Weight: 1, VertexKeyConfig: &schemas.VertexKeyConfig{
+			ProjectID: *schemas.NewSecretVar("p1"), Region: *schemas.NewSecretVar(region), AuthCredentials: *schemas.NewSecretVar("{}"),
+		}}
+	}
+	account.SetKeysForProvider(schemas.Vertex, []schemas.Key{key("regional", "us-central1"), key("global", "global"), key("eu", "eu")})
+	client, err := Init(context.Background(), schemas.BifrostConfig{Account: account, Logger: NewDefaultLogger(schemas.LogLevelError)})
+	if err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+	pool := func(ctx *schemas.BifrostContext, requestType schemas.RequestType, model string) []string {
+		t.Helper()
+		var keys []schemas.Key
+		var err error
+		if isResponsesLifecycleRequestType(requestType) {
+			// The worker walks these keys for a call that addresses a stored object by id.
+			if keys, err = client.getKeysForBatchAndFileOps(ctx, schemas.Vertex, schemas.Vertex, nil, false); err == nil {
+				keys = narrowVertexInteractionsKeys(ctx, schemas.Vertex, requestType, "", keys)
+			}
+		} else {
+			keys, _, err = client.selectKeyFromProviderForModelWithPool(ctx, requestType, schemas.Vertex, model, schemas.Vertex)
+		}
+		if err != nil {
+			t.Fatalf("select key: %v", err)
+		}
+		var ids []string
+		for _, k := range keys {
+			ids = append(ids, k.ID)
+		}
+		slices.Sort(ids)
+		return ids
+	}
+	newCtx := func() *schemas.BifrostContext {
+		return schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+	}
+	for _, requestType := range []schemas.RequestType{schemas.ResponsesRetrieveRequest, schemas.ResponsesRetrieveStreamRequest, schemas.ResponsesCancelRequest, schemas.ResponsesDeleteRequest, schemas.ResponsesInputItemsRequest} {
+		if got := pool(newCtx(), requestType, ""); !slices.Equal(got, []string{"eu", "global"}) {
+			t.Errorf("%s: got %v, want the keys in locations that serve Interactions", requestType, got)
+		}
+	}
+	if got := pool(newCtx(), schemas.ResponsesRequest, "gemini-3.8-flash"); !slices.Equal(got, []string{"eu", "global", "regional"}) {
+		t.Errorf("a create keeps the full pool, got %v", got)
+	}
+	located := newCtx()
+	located.SetValue(schemas.BifrostContextKeyInteractionsLocation, "eu")
+	if got := pool(located, schemas.ResponsesRequest, "gemini-3.8-flash"); !slices.Equal(got, []string{"eu"}) {
+		t.Errorf("a create on a path naming a location: got %v, want that location's key", got)
+	}
+	pinned := newCtx()
+	pinned.SetValue(schemas.BifrostContextKeyAPIKeyName, "regional")
+	if got := pool(pinned, schemas.ResponsesRetrieveRequest, ""); !slices.Equal(got, []string{"regional"}) {
+		t.Errorf("a pinned key is used as asked, got %v", got)
+	}
+}
+
 // allowedKeysAccount mirrors the transport account: it offers only the keys a virtual key allows,
 // read from the per-attempt governance context value.
 type allowedKeysAccount struct {

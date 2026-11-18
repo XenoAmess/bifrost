@@ -1311,6 +1311,9 @@ func (provider *VertexProvider) Responses(ctx *schemas.BifrostContext, key schem
 	if err := provider.inlineDocumentURLsResponses(ctx, key, request); err != nil {
 		return nil, providerUtils.NewBifrostOperationError("failed to inline document URLs for vertex", err)
 	}
+	if useVertexInteractions(ctx, request) {
+		return provider.interactionsResponses(ctx, key, request)
+	}
 	if schemas.IsAnthropicModelFamily(ctx, request.Model) {
 		jsonBody, bifrostErr := anthropic.BuildAnthropicResponsesRequestBody(ctx, request, anthropic.AnthropicRequestBuildConfig{
 			Provider:                  schemas.Vertex,
@@ -1616,6 +1619,9 @@ func (provider *VertexProvider) ResponsesStream(ctx *schemas.BifrostContext, pos
 	// Claude, which accepts base64 sources only. See classifyURLSource.
 	if err := provider.inlineDocumentURLsResponses(ctx, key, request); err != nil {
 		return nil, providerUtils.NewBifrostOperationError("failed to inline document URLs for vertex", err)
+	}
+	if useVertexInteractions(ctx, request) {
+		return provider.interactionsResponsesStream(ctx, postHookRunner, postHookSpanFinalizer, key, request)
 	}
 	if schemas.IsAnthropicModelFamily(ctx, request.Model) {
 		region := resolveVertexRegion(ctx, key)
@@ -4960,6 +4966,18 @@ func (provider *VertexProvider) ContainerFileDelete(_ *schemas.BifrostContext, _
 }
 
 func (provider *VertexProvider) Passthrough(
+	ctx *schemas.BifrostContext,
+	key schemas.Key,
+	req *schemas.BifrostPassthroughRequest,
+) (*schemas.BifrostPassthroughResponse, *schemas.BifrostError) {
+	// A stored run created through an alias lives where the alias sent it, which a read of it does not name.
+	if resp, bifrostErr, ok := provider.pollInteraction(ctx, key, req); ok {
+		return resp, bifrostErr
+	}
+	return provider.passthroughOnce(ctx, key, req)
+}
+
+func (provider *VertexProvider) passthroughOnce(
 	ctx *schemas.BifrostContext,
 	key schemas.Key,
 	req *schemas.BifrostPassthroughRequest,
