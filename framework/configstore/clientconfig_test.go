@@ -184,6 +184,22 @@ func TestGenerateClientConfigHash_BifrostURLAndAllowWritesAreUnambiguous(t *test
 	require.Equal(t, "66ee28323ac8b742b63ca063f251b2f585209a32980345cf26dd0b81298ddf4c", unsetHash, "both unset keeps the hash configs had before the fields existed")
 }
 
+// browser_base_url changes the hash only when set, so a config.json edit to it
+// reaches the stored config while configs without it keep their hash.
+func TestGenerateClientConfigHash_OAuth2BrowserBaseURL(t *testing.T) {
+	hashWith := func(browser *schemas.SecretVar) string {
+		c := ClientConfig{OAuth2ServerConfig: &tables.OAuth2ServerConfig{IssuerURL: schemas.NewSecretVar("https://tunnel.example.com"), BrowserBaseURL: browser}}
+		h, err := c.GenerateClientConfigHash()
+		require.NoError(t, err)
+		return h
+	}
+	unset := hashWith(nil)
+	require.Equal(t, unset, hashWith(schemas.NewSecretVar("")), "an empty value hashes like no value")
+	set := hashWith(schemas.NewSecretVar("https://bifrost.corp.example.com"))
+	require.NotEqual(t, unset, set)
+	require.NotEqual(t, set, hashWith(schemas.NewSecretVar("https://other.corp.example.com")))
+}
+
 // The entity access profile mode is part of what decides whether a changed config.json replaces the
 // stored client config: intersect must change the hash, while unset and an explicit union must hash
 // the same,

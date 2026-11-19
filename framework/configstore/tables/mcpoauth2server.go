@@ -59,6 +59,12 @@ type OAuth2ServerConfig struct {
 	// header-mode-only deployments where no OAuth issuer identity is needed.
 	IssuerURL *schemas.SecretVar `json:"issuer_url,omitempty"`
 
+	// BrowserBaseURL is where users' browsers reach Bifrost when MCP clients
+	// reach it on another hostname. The authorization endpoint, the consent
+	// redirect and the device sign-in pages use it; the issuer and every
+	// server-to-server endpoint stay on IssuerURL. Unset means IssuerURL.
+	BrowserBaseURL *schemas.SecretVar `json:"browser_base_url,omitempty"`
+
 	// AuthCodeTTL is the lifetime of the one-time authorization code issued by
 	// /oauth2/authorize and exchanged at /oauth2/token (seconds, default 300).
 	// The code is single-use — it is invalidated the moment it is exchanged or
