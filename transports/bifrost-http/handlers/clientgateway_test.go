@@ -613,6 +613,46 @@ func TestClaudeCodeGateway_BrowserBaseURL(t *testing.T) {
 	assert.Equal(t, testClaudeCodeResource, jsonBody(t, meta)["issuer"])
 }
 
+// TestClaudeCodeGateway_AdditionalIssuer pins the gateway on an additional
+// issuer's hostname: its metadata names that issuer, a sign-in started there gets
+// tokens naming it, and those tokens are honoured on the primary's hostname.
+func TestClaudeCodeGateway_AdditionalIssuer(t *testing.T) {
+	h, consent, store, cfg := newClaudeCodeGateway(t, false)
+	withTunnelIssuer(cfg)
+	vk := seedGatewayVK(t, store, "vk-tunnel", "sk-bf-tunnel")
+	onTunnel := func(ctx *fasthttp.RequestCtx) *fasthttp.RequestCtx {
+		ctx.Request.Header.SetHost("bifrost-tunnel.test")
+		return ctx
+	}
+	gatewayResource := testTunnelIssuer + "/gateway/claude-code"
+
+	meta := onTunnel(&fasthttp.RequestCtx{})
+	h.handleMetadata(meta)
+	assert.Equal(t, gatewayResource, jsonBody(t, meta)["issuer"])
+
+	start := onTunnel(formPostCtx("surface=claude_code"))
+	h.handleDeviceAuthorization(start)
+	require.Equal(t, fasthttp.StatusOK, start.Response.StatusCode(), string(start.Response.Body()))
+	deviceCode, _ := jsonBody(t, start)["device_code"].(string)
+	userCode, _ := jsonBody(t, start)["user_code"].(string)
+	submitDeviceConsent(t, h, consent, testIssuer, userCode, `{"mode":"vk","value":"`+vk.Value.GetValue()+`","user_code":"`+userCode+`"}`)
+
+	poll := onTunnel(formPostCtx(url.Values{"grant_type": {deviceCodeGrantType}, "device_code": {deviceCode}}.Encode()))
+	h.handleToken(poll)
+	require.Equal(t, fasthttp.StatusOK, poll.Response.StatusCode(), string(poll.Response.Body()))
+	access, _ := jsonBody(t, poll)["access_token"].(string)
+	claims := jwt.MapClaims{}
+	_, _, err := jwt.NewParser().ParseUnverified(access, claims)
+	require.NoError(t, err)
+	assert.Equal(t, testTunnelIssuer, claims["iss"])
+	assert.Equal(t, []any{gatewayResource}, claims["aud"])
+
+	called := false
+	onPrimary := bearerCtx(access)
+	h.BearerMiddleware(func(*fasthttp.RequestCtx) { called = true })(onPrimary)
+	assert.True(t, called, "a tunnel-issued gateway token on the primary's hostname: %s", onPrimary.Response.Body())
+}
+
 // TestClaudeCodeGateway_DeniedSignIn pins the consent page's Deny on a device sign-in: the
 // browser is sent to the denied page, the device's next poll is answered access_denied (RFC
 // 8628 §3.5) instead of polling until the code expires, and the refused sign-in cannot then be

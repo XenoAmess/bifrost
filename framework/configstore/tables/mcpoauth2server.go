@@ -65,6 +65,11 @@ type OAuth2ServerConfig struct {
 	// server-to-server endpoint stay on IssuerURL. Unset means IssuerURL.
 	BrowserBaseURL *schemas.SecretVar `json:"browser_base_url,omitempty"`
 
+	// AdditionalIssuerURLs are further issuers for hostnames that cannot reach
+	// IssuerURL, such as a private tunnel. A request whose host matches one is
+	// served that issuer; any other request gets IssuerURL, which stays the primary.
+	AdditionalIssuerURLs []*schemas.SecretVar `json:"additional_issuer_urls,omitempty"`
+
 	// AuthCodeTTL is the lifetime of the one-time authorization code issued by
 	// /oauth2/authorize and exchanged at /oauth2/token (seconds, default 300).
 	// The code is single-use — it is invalidated the moment it is exchanged or

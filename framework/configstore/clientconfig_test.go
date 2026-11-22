@@ -200,6 +200,25 @@ func TestGenerateClientConfigHash_OAuth2BrowserBaseURL(t *testing.T) {
 	require.NotEqual(t, set, hashWith(schemas.NewSecretVar("https://other.corp.example.com")))
 }
 
+// additional_issuer_urls changes the hash only when set, and the order and
+// value of each entry count.
+func TestGenerateClientConfigHash_OAuth2AdditionalIssuers(t *testing.T) {
+	hashWith := func(issuers ...string) string {
+		oc := &tables.OAuth2ServerConfig{IssuerURL: schemas.NewSecretVar("https://corp.example.com")}
+		for _, i := range issuers {
+			oc.AdditionalIssuerURLs = append(oc.AdditionalIssuerURLs, schemas.NewSecretVar(i))
+		}
+		h, err := (&ClientConfig{OAuth2ServerConfig: oc}).GenerateClientConfigHash()
+		require.NoError(t, err)
+		return h
+	}
+	unset := hashWith()
+	one := hashWith("https://a.example.com")
+	require.NotEqual(t, unset, one)
+	require.NotEqual(t, one, hashWith("https://b.example.com"))
+	require.NotEqual(t, hashWith("https://a.example.com", "https://b.example.com"), hashWith("https://b.example.com", "https://a.example.com"))
+}
+
 // The entity access profile mode is part of what decides whether a changed config.json replaces the
 // stored client config: intersect must change the hash, while unset and an explicit union must hash
 // the same,

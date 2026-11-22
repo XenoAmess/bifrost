@@ -2977,6 +2977,46 @@ func TestValidateClientConfig_BrowserBaseURL(t *testing.T) {
 	}
 }
 
+// TestValidateClientConfig_AdditionalIssuers pins the rules that keep issuer
+// selection unambiguous: each entry needs the primary, is an absolute URL, and
+// has a hostname no other issuer uses, since the hostname picks the issuer.
+func TestValidateClientConfig_AdditionalIssuers(t *testing.T) {
+	cfg := func(primary string, extra ...string) *configstore.ClientConfig {
+		oc := &tables.OAuth2ServerConfig{}
+		if primary != "" {
+			oc.IssuerURL = schemas.NewSecretVar(primary)
+		}
+		for _, e := range extra {
+			oc.AdditionalIssuerURLs = append(oc.AdditionalIssuerURLs, schemas.NewSecretVar(e))
+		}
+		return &configstore.ClientConfig{OAuth2ServerConfig: oc}
+	}
+	tooMany := make([]string, configstore.MaxAdditionalIssuerURLs+1)
+	for i := range tooMany {
+		tooMany[i] = fmt.Sprintf("https://tunnel-%d.example.com", i)
+	}
+	for name, tc := range map[string]struct {
+		cc      *configstore.ClientConfig
+		wantErr string
+	}{
+		"none":                     {cfg("https://corp.example.com"), ""},
+		"one, with a base path":    {cfg("https://corp.example.com", "https://tunnel.example.com/bifrost/"), ""},
+		"without a primary":        {cfg("", "https://tunnel.example.com"), "requires issuer_url"},
+		"not absolute":             {cfg("https://corp.example.com", "tunnel.example.com"), "additional_issuer_urls[0] must be an absolute"},
+		"empty entry":              {cfg("https://corp.example.com", ""), "additional_issuer_urls[0] is empty"},
+		"primary's hostname":       {cfg("https://corp.example.com", "https://CORP.example.com:443/other"), "repeats the hostname"},
+		"another entry's hostname": {cfg("https://corp.example.com", "https://tunnel.example.com", "http://tunnel.example.com:80"), "additional_issuer_urls[1] repeats the hostname"},
+		"over the limit":           {cfg("https://corp.example.com", tooMany...), "at most"},
+	} {
+		err := validateClientConfig(tc.cc)
+		if tc.wantErr == "" {
+			require.NoError(t, err, name)
+		} else {
+			require.ErrorContains(t, err, tc.wantErr, name)
+		}
+	}
+}
+
 // TestValidateClientConfig_IssuerURLRequiredForDiscovery locks in that OAuth
 // discovery (mode oauth|both) cannot be enabled without a pinned issuer_url -
 // left unset, every issuer reference would derive from the unauthenticated,
