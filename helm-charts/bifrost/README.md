@@ -4,9 +4,15 @@
 
 Official Helm charts for deploying [Bifrost](https://github.com/maximhq/bifrost) - a high-performance AI gateway with unified interface for multiple providers.
 
-**Latest Version:** 2.1.49
+**Latest Version:** 2.1.50
 
 ## Changelog
+
+### Upcoming
+
+- Added `client_credentials` to `bifrost.mcp.clientConfigs[].authType`, with a `clientCredentials` block that renders into `client_credentials`: Bifrost requests one token with credentials registered at the server's authorization server.
+- Added `aws_sigv4` to `bifrost.mcp.clientConfigs[].authType`, with an `awsSigV4` block (`region`, `service`, `roleArn`, `externalId`, `sessionName`) that renders into `aws_sigv4`: Bifrost signs requests with its own AWS identity, for Amazon Bedrock AgentCore Gateway and other IAM-protected servers.
+- `aws_sigv4` is accepted for `http`, `sse` and `openapi` clients, and `client_credentials` for `http` and `sse`. The chart refuses both on `stdio`.
 
 ### 2.1.49
 
