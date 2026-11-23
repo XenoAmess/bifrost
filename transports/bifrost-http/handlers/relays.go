@@ -129,11 +129,24 @@ func (h *RelaysHandler) RegisterLogRoutes(r *router.Router, middlewares ...schem
 // redacted.
 type relayView struct {
 	*schemas.RelayConfig
-	URL string `json:"url"` // the path callers use, /relay/{name}
+	URL        string `json:"url"`                   // the path callers use, /relay/{name}
+	MatchOrder []int  `json:"match_order,omitempty"` // route indices in the order the gateway tries them
 }
 
 func endpointView(cfg *schemas.RelayConfig) relayView {
 	return relayView{RelayConfig: cfg.Redacted(), URL: "/relay/" + cfg.Name}
+}
+
+// view is endpointView with the order the gateway tries the relay's routes in, read from the live
+// endpoint, which ordered them once when it was built.
+func (h *RelaysHandler) view(cfg *schemas.RelayConfig) relayView {
+	v := endpointView(cfg)
+	// Ranked from the config being returned, the same way the gateway ranks it when it builds the
+	// relay, so routes and order always describe one version, even mid-update.
+	if len(cfg.Routes) > 0 {
+		v.MatchOrder = relay.RouteMatchOrder(cfg.Routes)
+	}
+	return v
 }
 
 func (h *RelaysHandler) list(ctx *fasthttp.RequestCtx) {
@@ -170,7 +183,7 @@ func (h *RelaysHandler) list(ctx *fasthttp.RequestCtx) {
 		if search != "" && !strings.Contains(strings.ToLower(cfg.Name), search) && !strings.Contains(strings.ToLower(cfg.Description), search) {
 			continue
 		}
-		matches = append(matches, endpointView(cfg))
+		matches = append(matches, h.view(cfg))
 	}
 	page := matches[min(offset, len(matches)):]
 	if limit > 0 && len(page) > limit {
@@ -190,7 +203,7 @@ func (h *RelaysHandler) get(ctx *fasthttp.RequestCtx) {
 		h.storeError(ctx, err)
 		return
 	}
-	SendJSON(ctx, endpointView(cfg))
+	SendJSON(ctx, h.view(cfg))
 }
 
 func (h *RelaysHandler) create(ctx *fasthttp.RequestCtx) {
@@ -211,7 +224,7 @@ func (h *RelaysHandler) create(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	lib.RecordAuditChange(ctx, "relay.created", "relay", cfg.Name, cfg.Name, nil, endpointView(stored))
-	SendJSONWithStatus(ctx, endpointView(stored), fasthttp.StatusCreated)
+	SendJSONWithStatus(ctx, h.view(stored), fasthttp.StatusCreated)
 }
 
 func (h *RelaysHandler) update(ctx *fasthttp.RequestCtx) {
@@ -240,7 +253,7 @@ func (h *RelaysHandler) update(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	lib.RecordAuditChange(ctx, "relay.updated", "relay", name, name, endpointView(previous), endpointView(updated))
-	SendJSON(ctx, endpointView(updated))
+	SendJSON(ctx, h.view(updated))
 }
 
 func (h *RelaysHandler) delete(ctx *fasthttp.RequestCtx) {

@@ -31,7 +31,8 @@ func TestRelayConfigValidate(t *testing.T) {
 		{"route method", &RelayConfig{Routes: []RelayRouteConfig{{Method: "FETCH", Path: "/x"}}}, "routes[0]: unsupported method"},
 		{"route path must be rooted", &RelayConfig{Routes: []RelayRouteConfig{{Method: "GET", Path: "x"}}}, "must start with /"},
 		{"route glob syntax", &RelayConfig{Routes: []RelayRouteConfig{{Method: "GET", Path: "/[x"}}}, "routes[0]"},
-		{"double star only last", &RelayConfig{Routes: []RelayRouteConfig{{Method: "GET", Path: "/**/x"}}}, "only allowed as the last segment"},
+		{"double star in the middle ok", &RelayConfig{Routes: []RelayRouteConfig{{Method: "GET", Path: "/jobs/**/status"}}}, ""},
+		{"double star only once", &RelayConfig{Routes: []RelayRouteConfig{{Method: "GET", Path: "/**/x/**"}}}, "only allowed once"},
 		{"header route ok", &RelayConfig{Routes: []RelayRouteConfig{{Method: "POST", Path: "/", Headers: map[string]string{"X-Amz-Target": "Textract.Get*"}}}}, ""},
 		{"header name must be a token", &RelayConfig{Routes: []RelayRouteConfig{{Method: "POST", Path: "/", Headers: map[string]string{"X Amz": "x"}}}}, "not a valid header name"},
 		{"header value required", &RelayConfig{Routes: []RelayRouteConfig{{Method: "POST", Path: "/", Headers: map[string]string{"X-Amz-Target": " "}}}}, "a value glob is required"},
@@ -596,4 +597,21 @@ func TestRelayJobSigV4PollHeaders(t *testing.T) {
 	require.ErrorContains(t, poll("X-Amz-Date").validate("job", route, nil, sigv4), "never sent")
 	require.ErrorContains(t, poll("X-Amz-Security-Token").validate("job", route, nil, sigv4), "carries a credential")
 	require.NoError(t, poll("X-Amz-Date").validate("job", route, nil, RelayAuthConfig{Type: RelayAuthBearer}), "only SigV4 owns it")
+}
+
+// A route repeating an earlier one's method, path and headers could never match, so a save refuses it.
+func TestRelayConfigRepeatedRoute(t *testing.T) {
+	cfg := &RelayConfig{Routes: []RelayRouteConfig{
+		{Method: "POST", Path: "/", Headers: map[string]string{"X-Amz-Target": "Textract.Start*"}},
+		{Method: "POST", Path: "/", Headers: map[string]string{"X-Amz-Target": "Textract.Get*"}},
+		{Method: "GET", Path: "/"},
+	}}
+	require.NoError(t, cfg.RepeatedRoute(), "different headers or methods are different routes")
+	cfg.Routes = append(cfg.Routes, RelayRouteConfig{Method: "post", Path: "/", Headers: map[string]string{"x-amz-target": "Textract.Get*"}})
+	require.ErrorContains(t, cfg.RepeatedRoute(), "routes[3] repeats routes[1]")
+	glued := &RelayConfig{Routes: []RelayRouteConfig{
+		{Method: "GET", Path: "/", Headers: map[string]string{"X": "a y: b"}},
+		{Method: "GET", Path: "/", Headers: map[string]string{"X": "a", "Y": "b"}},
+	}}
+	require.NoError(t, glued.RepeatedRoute(), "headers that only read the same when glued together are different")
 }

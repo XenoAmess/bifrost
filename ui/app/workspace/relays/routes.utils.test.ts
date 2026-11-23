@@ -29,3 +29,16 @@ describe("withRoutes in a browser that rounds big numbers", () => {
 		expect(withRoutes(relay, [formRoutes[1]]).routes).toHaveLength(1);
 	});
 });
+
+describe("withRoutes with a repeated route", () => {
+	const relay = {
+		name: "r",
+		base_url: "https://api.example.com",
+		auth: { type: "none" },
+		routes: [{ method: "GET", path: "/a" }],
+	} as unknown as Relay;
+	it("refuses a route repeating another's method, path and headers", () => {
+		const [route] = toRelayForm(relay).routes;
+		expect(() => withRoutes(relay, [route, { ...route, method: "get" }])).toThrow();
+	});
+});
