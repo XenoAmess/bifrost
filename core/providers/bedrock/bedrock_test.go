@@ -10148,6 +10148,20 @@ func TestBedrockToolResultKeepsEveryMember(t *testing.T) {
 		assert.Equal(t, pdf, *got[0].Document.Source.Bytes)
 	})
 
+	t.Run("custom-content document", func(t *testing.T) {
+		// Bedrock accepts custom content only with citations enabled.
+		custom := bedrock.BedrockContentBlock{Document: &bedrock.BedrockDocumentSource{Name: "notes", Source: &bedrock.BedrockDocumentSourceData{
+			Content: []bedrock.BedrockDocumentContentBlock{{Text: schemas.Ptr("ORCHID-7731")}},
+		}, Citations: &bedrock.BedrockCitationsConfig{Enabled: true}}}
+		got, err := toolResultRoundTrip(t, []bedrock.BedrockContentBlock{custom})
+		require.NoError(t, err)
+		require.Len(t, got, 1, "got %s", mustMarshalJSON(got))
+		require.NotNil(t, got[0].Document, "document dropped: %s", mustMarshalJSON(got))
+		require.NotNil(t, got[0].Document.Source)
+		require.Len(t, got[0].Document.Source.Content, 1, "custom content dropped: %s", mustMarshalJSON(got))
+		assert.Equal(t, "ORCHID-7731", *got[0].Document.Source.Content[0].Text)
+	})
+
 	t.Run("two text blocks", func(t *testing.T) {
 		got, err := toolResultRoundTrip(t, []bedrock.BedrockContentBlock{{Text: schemas.Ptr("alpha")}, {Text: schemas.Ptr("bravo")}})
 		require.NoError(t, err)

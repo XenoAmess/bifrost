@@ -4500,8 +4500,8 @@ func validateBedrockToolResultContent(messages []BedrockMessage) error {
 						problem = "an image must carry inline bytes"
 					}
 				case c.Document != nil:
-					if src := c.Document.Source; src == nil || (src.Bytes == nil && src.Text == nil && src.URL == nil) {
-						problem = "a document must carry inline bytes, text or a url"
+					if src := c.Document.Source; src == nil || (src.Bytes == nil && src.Text == nil && src.URL == nil && len(src.Content) == 0) {
+						problem = "a document must carry inline bytes, text, content or a url"
 					}
 				default:
 					problem = "only text, json, image and document blocks are supported"
