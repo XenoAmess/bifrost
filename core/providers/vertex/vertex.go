@@ -1437,6 +1437,7 @@ func (provider *VertexProvider) Responses(ctx *schemas.BifrostContext, key schem
 
 		return response, nil
 	} else if schemas.IsGeminiModelFamily(ctx, request.Model) || schemas.IsAllDigitsASCII(request.Model) || schemas.IsGemmaModelFamily(ctx, request.Model) {
+		gemini.RecordGeminiClientToolSearch(ctx, request)
 		jsonBody, bifrostErr := providerUtils.CheckContextAndGetRequestBody(
 			ctx,
 			request,
@@ -1583,6 +1584,7 @@ func (provider *VertexProvider) Responses(ctx *schemas.BifrostContext, key schem
 		}
 
 		response := geminiResponse.ToResponsesBifrostResponsesResponse()
+		gemini.MarkGeminiClientToolSearchCalls(ctx, response)
 		response.ExtraFields.Latency = latency.Milliseconds()
 		response.ExtraFields.ProviderResponseHeaders = providerUtils.ExtractProviderResponseHeaders(resp)
 
@@ -1699,6 +1701,7 @@ func (provider *VertexProvider) ResponsesStream(ctx *schemas.BifrostContext, pos
 		}
 
 		// Use Gemini-style streaming for Gemini models
+		gemini.RecordGeminiClientToolSearch(ctx, request)
 		jsonData, bifrostErr := providerUtils.CheckContextAndGetRequestBody(
 			ctx,
 			request,

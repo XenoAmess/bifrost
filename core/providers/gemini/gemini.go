@@ -770,6 +770,7 @@ func (provider *GeminiProvider) Responses(ctx *schemas.BifrostContext, key schem
 	if ShouldUseGeminiInteractions(ctx, request) {
 		return InteractionsResponses(ctx, provider.interactionsTarget(ctx, key), request)
 	}
+	RecordGeminiClientToolSearch(ctx, request)
 
 	// Check for large payload streaming mode (enterprise-only feature)
 	// In large payload mode, the request body streams directly from the client — skip body conversion
@@ -838,6 +839,7 @@ func (provider *GeminiProvider) Responses(ctx *schemas.BifrostContext, key schem
 
 	// Create final response
 	bifrostResponse := geminiResponse.ToResponsesBifrostResponsesResponse()
+	MarkGeminiClientToolSearchCalls(ctx, bifrostResponse)
 
 	// Set ExtraFields
 	bifrostResponse.ExtraFields.Latency = latency.Milliseconds()
@@ -953,6 +955,7 @@ func (provider *GeminiProvider) responsesWithLargeResponseDetection(
 	}
 	ct, ch := providerUtils.StartResponseConvertorSpan(ctx)
 	bifrostResponse := geminiResponse.ToResponsesBifrostResponsesResponse()
+	MarkGeminiClientToolSearchCalls(ctx, bifrostResponse)
 	if ct != nil {
 		ct.EndSpan(ch, schemas.SpanStatusOk, "")
 	}
@@ -997,6 +1000,7 @@ func (provider *GeminiProvider) ResponsesStream(ctx *schemas.BifrostContext, pos
 	if ShouldUseGeminiInteractions(ctx, request) {
 		return InteractionsResponsesStream(ctx, provider.interactionsTarget(ctx, key), postHookRunner, postHookSpanFinalizer, request)
 	}
+	RecordGeminiClientToolSearch(ctx, request)
 
 	jsonData, err := providerUtils.CheckContextAndGetRequestBody(
 		ctx,
@@ -1191,6 +1195,7 @@ func HandleGeminiResponsesStream(
 		// Initialize stream state for responses lifecycle management
 		streamState := acquireGeminiResponsesStreamState()
 		defer releaseGeminiResponsesStreamState(streamState)
+		streamState.ClientToolSearchName = geminiClientToolSearchFrom(ctx)
 
 		var lastUsageMetadata *GenerateContentResponseUsageMetadata
 
