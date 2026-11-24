@@ -86,7 +86,13 @@ func (s *BifrostHTTPServer) startEndpointJobSweeper(reporter jobaccounting.Relay
 	nodeID := ""
 	if loggerPlugin, err := lib.FindPluginAs[*logging.LoggerPlugin](s.Config, logging.PluginName); err == nil && loggerPlugin != nil {
 		nodeID = loggerPlugin.ClusterNodeID()
+		// A caller's finished status check is confirmed with Bifrost's own poll.
+		loggerPlugin.SetRelayJobPoller(s.relays)
 	}
+	// Only a call naming a job Bifrost started is relayed free as a status check.
+	s.relays.SetJobLookup(func(ctx context.Context, relayName, routeKey, jobID string) bool {
+		return jobaccounting.HasRelayJob(ctx, store, relayName, routeKey, jobID)
+	})
 	config := jobaccounting.SweeperConfig{Interval: 10 * time.Second, Logger: logger, ClaimedBy: jobaccounting.RunnerID("relay-sweeper", nodeID)}
 	// Assigned only when set: a nil *kvstore.Store in the interface would not compare as nil.
 	if s.Config.KVStore != nil {
