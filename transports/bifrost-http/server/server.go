@@ -1302,13 +1302,14 @@ func (s *BifrostHTTPServer) RemoveProvider(ctx context.Context, provider schemas
 		logger.Error("failed to remove provider from config: %v. Client and config may be out of sync, please restart bifrost", err)
 		return fmt.Errorf("failed to remove provider from config: %w. Client and config may be out of sync, please restart bifrost", err)
 	}
+	// The provider is gone from the config store from here on.
 	governancePlugin, err := s.getGovernancePlugin()
 	if err != nil {
-		return err
+		return &lib.SavedNotAppliedError{Err: err}
 	}
 	governancePlugin.GetGovernanceStore().DeleteProviderInMemory(ctx, string(provider))
 	if s.Config == nil || s.Config.ModelCatalog == nil {
-		return fmt.Errorf("pricing manager not found")
+		return &lib.SavedNotAppliedError{Err: fmt.Errorf("pricing manager not found")}
 	}
 	s.Config.ModelCatalog.InvalidateLiveProvider(provider)
 	s.Config.ModelCatalog.RemoveKeyConfigForProvider(provider)

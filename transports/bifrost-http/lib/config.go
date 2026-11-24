@@ -9845,6 +9845,9 @@ func (c *Config) UpdateProviderConfig(ctx context.Context, provider schemas.Mode
 		}
 		// If database was updated, we can't rollback the transaction here
 		// but the in-memory state will be consistent
+		if c.ConfigStore != nil && !skipDBUpdate {
+			return &SavedNotAppliedError{Err: fmt.Errorf("failed to update provider: %w", clientErr)}
+		}
 		return fmt.Errorf("failed to update provider: %w", clientErr)
 	}
 
@@ -9898,7 +9901,7 @@ func (c *Config) AddProviderKey(ctx context.Context, provider schemas.ModelProvi
 			// key. Failing here avoids committing the original plaintext into
 			// c.Providers (and serving it via the keys API) on vault deployments.
 			logger.Error("failed to re-read stored key %s for provider %s after create: %v", key.ID, provider, err)
-			return fmt.Errorf("failed to re-read provider key after create: %w", err)
+			return &SavedNotAppliedError{Err: fmt.Errorf("failed to re-read provider key after create: %w", err)}
 		}
 		if idx := slices.IndexFunc(updatedConfig.Keys, func(k schemas.Key) bool { return k.ID == key.ID }); idx != -1 {
 			updatedConfig.Keys[idx] = *storedKey
@@ -9914,6 +9917,9 @@ func (c *Config) AddProviderKey(ctx context.Context, provider schemas.ModelProvi
 	if clientErr != nil {
 		if reflect.DeepEqual(c.Providers[provider], updatedConfig) {
 			c.Providers[provider] = existingConfig
+		}
+		if c.ConfigStore != nil && !skipDBUpdate {
+			return &SavedNotAppliedError{Err: fmt.Errorf("failed to update provider: %w", clientErr)}
 		}
 		return fmt.Errorf("failed to update provider: %w", clientErr)
 	}
@@ -9973,7 +9979,7 @@ func (c *Config) UpdateProviderKey(ctx context.Context, provider schemas.ModelPr
 			// key. Failing here avoids committing the original plaintext into
 			// c.Providers (and serving it via the keys API) on vault deployments.
 			logger.Error("failed to re-read stored key %s for provider %s after update: %v", keyID, provider, err)
-			return fmt.Errorf("failed to re-read provider key after update: %w", err)
+			return &SavedNotAppliedError{Err: fmt.Errorf("failed to re-read provider key after update: %w", err)}
 		}
 		updatedConfig.Keys[index] = *storedKey
 	}
@@ -9987,6 +9993,9 @@ func (c *Config) UpdateProviderKey(ctx context.Context, provider schemas.ModelPr
 	if clientErr != nil {
 		if reflect.DeepEqual(c.Providers[provider], updatedConfig) {
 			c.Providers[provider] = existingConfig
+		}
+		if c.ConfigStore != nil && !skipDBUpdate {
+			return &SavedNotAppliedError{Err: fmt.Errorf("failed to update provider: %w", clientErr)}
 		}
 		return fmt.Errorf("failed to update provider: %w", clientErr)
 	}
@@ -10040,6 +10049,9 @@ func (c *Config) RemoveProviderKey(ctx context.Context, provider schemas.ModelPr
 	if clientErr != nil {
 		if reflect.DeepEqual(c.Providers[provider], updatedConfig) {
 			c.Providers[provider] = existingConfig
+		}
+		if c.ConfigStore != nil && !skipDBUpdate {
+			return &SavedNotAppliedError{Err: fmt.Errorf("failed to update provider: %w", clientErr)}
 		}
 		return fmt.Errorf("failed to update provider: %w", clientErr)
 	}
