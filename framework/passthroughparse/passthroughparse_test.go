@@ -297,8 +297,6 @@ func TestParseUnknownRoutesReturnNil(t *testing.T) {
 	}{
 		{"openai list models", Input{Provider: schemas.OpenAI, Method: "GET", Path: "/v1/models", StatusCode: 200, ResponseBody: []byte(`{"data":[]}`)}},
 		{"anthropic batches", Input{Provider: schemas.Anthropic, Method: "POST", Path: "/v1/messages/batches", StatusCode: 200, RequestBody: []byte(`{"requests":[]}`)}},
-		{"gemini interactions", Input{Provider: schemas.Gemini, Method: "POST", Path: "/interactions", StatusCode: 200, RequestBody: []byte(`{}`)}},
-		{"bedrock agent route", Input{Provider: schemas.Bedrock, Method: "POST", Path: "/agents/a/agentAliases/b/sessions/c/text", StatusCode: 200, RequestBody: []byte(`{"inputText":"hi"}`)}},
 		{"provider without passthrough", Input{Provider: schemas.Groq, Method: "POST", Path: "/v1/chat/completions", StatusCode: 200, RequestBody: []byte(openAIChatRequest)}},
 		// The parser keys off the wire format, so a custom provider's own name is not enough;
 		// the caller resolves it to its BaseProviderType first (see TestParseCustomProviderBaseType).
@@ -964,6 +962,20 @@ func TestClassify(t *testing.T) {
 		{"gemini cached content", schemas.Gemini, "POST", "/v1beta/cachedContents", Route{schemas.Gemini, schemas.CachedContentCreateRequest}},
 		{"vertex cached content", schemas.Vertex, "POST", "/projects/p/locations/l/cachedContents", Route{schemas.Gemini, schemas.CachedContentCreateRequest}},
 		{"gemini cached content list", schemas.Gemini, "GET", "/v1beta/cachedContents", Route{}},
+		{"gemini interactions create", schemas.Gemini, "POST", "/v1beta/interactions", Route{WireGeminiInteractions, schemas.ResponsesRequest}},
+		{"gemini interactions poll", schemas.Gemini, "GET", "/v1beta/interactions/v1_abc", Route{WireGeminiInteractions, schemas.ResponsesRetrieveRequest}},
+		{"gemini interactions delete", schemas.Gemini, "DELETE", "/v1beta/interactions/v1_abc", Route{}},
+		{"gemini interactions cancel", schemas.Gemini, "POST", "/v1beta/interactions/v1_abc/cancel", Route{}},
+		{"vertex interactions create", schemas.Vertex, "POST", "/projects/p/locations/l/interactions", Route{WireGeminiInteractions, schemas.ResponsesRequest}},
+		{"runware task endpoint", schemas.Runware, "POST", "/v1", Route{Wire: schemas.Runware}},
+		{"runware root", schemas.Runware, "POST", "", Route{Wire: schemas.Runware}},
+		{"runware openai chat", schemas.Runware, "POST", "/v1/chat/completions", Route{schemas.OpenAI, schemas.ChatCompletionRequest}},
+		{"runware anthropic messages", schemas.Runware, "POST", "/v1/messages", Route{schemas.Anthropic, schemas.ResponsesRequest}},
+		{"runware unknown path", schemas.Runware, "POST", "/v1/files", Route{}},
+		{"sagemaker invocations", schemas.SageMaker, "POST", "/endpoints/my-tgi/invocations", Route{Wire: schemas.SageMaker}},
+		{"sagemaker stream", schemas.SageMaker, "POST", "/endpoints/my-tgi/invocations-response-stream", Route{Wire: schemas.SageMaker}},
+		{"bedrock invoke agent", schemas.Bedrock, "POST", "/agents/AGENT1/agentAliases/ALIAS1/sessions/s-1/text", Route{Wire: schemas.Bedrock}},
+		{"bedrock knowledge base retrieve", schemas.Bedrock, "POST", "/knowledgebases/KB1/retrieve", Route{}},
 		{"untyped route", schemas.Anthropic, "POST", "/v1/files", Route{}},
 		{"non-POST call", schemas.Anthropic, "GET", "/v1/messages", Route{}},
 		{"provider without a parser", schemas.Bedrock, "POST", "/model/anthropic.claude-sonnet-4-5/invoke", Route{}},
@@ -1102,5 +1114,339 @@ func BenchmarkRedactStreamBody(b *testing.B) {
 		if _, ok := RedactStreamBody(raw, schemas.RawResponseFormatOpenAIChatCompletionChunk, replacements); !ok {
 			b.Fatal("unhandled")
 		}
+	}
+}
+
+// TestBodyDecidedRoutesKeepPassthroughRows verifies a route whose request type the body names infers no request type
+// (its log row stays a passthrough one) while Parse names the type the body made.
+func TestBodyDecidedRoutesKeepPassthroughRows(t *testing.T) {
+	require.Empty(t, InferRequestType(schemas.Runware, "", "POST", "/v1", false))
+	require.Empty(t, InferRequestType(schemas.SageMaker, "", "POST", "/endpoints/e/invocations", true))
+	require.Empty(t, InferRequestType(schemas.Bedrock, "", "POST", "/agents/A/agentAliases/B/sessions/c/text", true))
+	require.Equal(t, schemas.ResponsesRetrieveStreamRequest, InferRequestType(schemas.Gemini, "", "GET", "/v1beta/interactions/v1_abc", true))
+
+	r, err := Parse(Input{Provider: schemas.Runware, Method: "POST", Path: "/v1", RequestBody: []byte(`[{"taskType":"imageInference","positivePrompt":"a red fox"}]`)})
+	require.NoError(t, err)
+	require.NotNil(t, r)
+	require.Equal(t, schemas.ImageGenerationRequest, r.RequestType)
+}
+
+// TestParseRunware verifies a Runware task array reads as the request its task types name, with every text a guardrail
+// or log reads, and a task response's text results as chat choices. Synthetic payloads.
+func TestParseRunware(t *testing.T) {
+	parse := func(body string) *Result {
+		t.Helper()
+		r, err := Parse(Input{Provider: schemas.Runware, Method: "POST", Path: "/v1", RequestBody: []byte(body)})
+		require.NoError(t, err)
+		return r
+	}
+
+	r := parse(`[{"taskType":"textInference","settings":{"systemPrompt":"be brief"},"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"hello"}],"futureField":1},` +
+		`{"taskType":"imageInference","positivePrompt":"a red fox","negativePrompt":"blur"}]`)
+	require.NotNil(t, r)
+	require.Equal(t, schemas.ChatCompletionRequest, r.RequestType)
+	var texts []string
+	for _, message := range r.Request.ChatRequest.Input {
+		texts = append(texts, string(message.Role)+":"+*message.Content.ContentStr)
+	}
+	require.Equal(t, []string{"system:be brief", "user:hi", "assistant:hello", "user:a red fox"}, texts)
+
+	r = parse(`{"taskType":"videoInference","positivePrompt":"waves at dusk"}`)
+	require.Equal(t, schemas.VideoGenerationRequest, r.RequestType)
+	require.Equal(t, "waves at dusk", r.Request.VideoGenerationRequest.Input.Prompt)
+
+	require.Nil(t, parse(`[{"taskType":"imageUpscale","inputImage":"img"}]`), "tasks without text have no text form")
+
+	resp, err := Parse(Input{Provider: schemas.Runware, Method: "POST", Path: "/v1", StatusCode: 200,
+		ResponseBody: []byte(`{"data":[{"taskType":"textInference","taskUUID":"t1","text":"Ocean breathes","reasoningContent":"think","finishReason":"stop"},{"taskType":"imageInference","imageURL":"https://x"}]}`)})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	require.Len(t, resp.Response.ChatResponse.Choices, 1)
+	require.Equal(t, "Ocean breathes", *resp.Response.ChatResponse.Choices[0].Message.Content.ContentStr)
+
+	resp, err = Parse(Input{Provider: schemas.Runware, Method: "POST", Path: "/v1", StatusCode: 200, ResponseBody: []byte(`{"data":[{"taskType":"imageInference","imageURL":"https://x"}]}`)})
+	require.NoError(t, err)
+	require.Nil(t, resp, "an image-only response has no text form")
+}
+
+// TestParseSageMaker verifies a SageMaker invocation reads by the shape its container accepts and returns: OpenAI chat
+// and completion bodies, TGI/LMI generate inputs and generated text, TEI inputs and vectors, and SSE or JSON-lines token
+// streams. Synthetic payloads.
+func TestParseSageMaker(t *testing.T) {
+	in := func(request, response string, stream bool) Input {
+		return Input{Provider: schemas.SageMaker, Method: "POST", Path: "/endpoints/e/invocations", StatusCode: 200,
+			RequestBody: []byte(request), ResponseBody: []byte(response), Stream: stream}
+	}
+
+	r, err := Parse(in(`{"inputs":"Deep learning is","parameters":{"max_new_tokens":8}}`, `[{"generated_text":"a field of ML"}]`, false))
+	require.NoError(t, err)
+	require.Equal(t, schemas.TextCompletionRequest, r.RequestType)
+	require.Equal(t, "Deep learning is", *r.Request.TextCompletionRequest.Input.PromptStr)
+	require.Equal(t, "a field of ML", *r.Response.TextCompletionResponse.Choices[0].Text)
+
+	r, err = Parse(in(`{"inputs":["a","b"]}`, `[[0.1,0.2],[0.3,0.4]]`, false))
+	require.NoError(t, err)
+	require.Equal(t, []string{"a", "b"}, r.Request.TextCompletionRequest.Input.PromptArray)
+	require.NotNil(t, r.Response.EmbeddingResponse, "embedding vectors carry no text")
+
+	r, err = Parse(in(`{"messages":[{"role":"user","content":"hi"}],"max_tokens":8}`, `{"object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}]}`, false))
+	require.NoError(t, err)
+	require.Equal(t, schemas.ChatCompletionRequest, r.RequestType)
+	require.Equal(t, "hello", *r.Response.ChatResponse.Choices[0].Message.Content.ContentStr)
+
+	r, err = Parse(in(`{"query":"q","texts":["a"]}`, `[{"index":0,"score":0.9}]`, false))
+	require.NoError(t, err)
+	require.Nil(t, r, "a rerank body has no text form")
+
+	tgi := "data:{\"index\":1,\"token\":{\"id\":1,\"text\":\"Deep \",\"logprob\":-0.1,\"special\":false},\"generated_text\":null,\"details\":null}\n\n" +
+		"data:{\"index\":2,\"token\":{\"id\":2,\"text\":\"learning\",\"logprob\":-0.1,\"special\":false},\"generated_text\":null,\"details\":null}\n\n" +
+		"data:{\"index\":3,\"token\":{\"id\":0,\"text\":\"</s>\",\"logprob\":0,\"special\":true},\"generated_text\":null,\"details\":null}\n\n"
+	r, err = Parse(in(`{"inputs":"x","stream":true}`, tgi, true))
+	require.NoError(t, err)
+	require.Equal(t, "Deep learning", *r.Response.TextCompletionResponse.Choices[0].Text)
+
+	lmi := "{\"token\": {\"id\": 304, \"text\": \"Deep \", \"log_prob\": -0.05}}\n" +
+		"{\"token\": {\"id\": 305, \"text\": \"Learning\", \"log_prob\": -0.05}, \"generated_text\": \"Deep Learning\"}\n"
+	r, err = Parse(in(`{"inputs":"x","stream":true}`, lmi, true))
+	require.NoError(t, err)
+	require.Equal(t, "Deep Learning", *r.Response.TextCompletionResponse.Choices[0].Text)
+
+	chunks := "{\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hel\"}}]}\n" +
+		"{\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"lo\"},\"finish_reason\":\"stop\"}]}\n"
+	r, err = Parse(in(`{"messages":[{"role":"user","content":"hi"}],"stream":true}`, chunks, true))
+	require.NoError(t, err)
+	require.Equal(t, "hello", *r.Response.ChatResponse.Choices[0].Message.Content.ContentStr)
+
+	// TGI 1.4 to 2.0 label chat replies and chunks text_completion; what the choice carries decides.
+	r, err = Parse(in(`{"messages":[{"role":"user","content":"hi"}]}`, `{"object":"text_completion","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}]}`, false))
+	require.NoError(t, err)
+	require.Equal(t, "hello", *r.Response.ChatResponse.Choices[0].Message.Content.ContentStr)
+	labelled := strings.ReplaceAll(chunks, "chat.completion.chunk", "text_completion")
+	r, err = Parse(in(`{"messages":[{"role":"user","content":"hi"}],"stream":true}`, labelled, true))
+	require.NoError(t, err)
+	require.Equal(t, "hello", *r.Response.ChatResponse.Choices[0].Message.Content.ContentStr)
+	r, err = Parse(in(`{"prompt":"say"}`, `{"object":"text_completion","choices":[{"index":0,"text":"done","finish_reason":"stop"}]}`, false))
+	require.NoError(t, err)
+	require.Equal(t, "done", *r.Response.TextCompletionResponse.Choices[0].Text)
+	r, err = Parse(in(`{"prompt":"say","stream":true}`, "{\"object\":\"text_completion\",\"choices\":[{\"index\":0,\"text\":\"do\"}]}\n{\"object\":\"text_completion\",\"choices\":[{\"index\":0,\"text\":\"ne\"}]}\n", true))
+	require.NoError(t, err)
+	require.Equal(t, "done", *r.Response.TextCompletionResponse.Choices[0].Text)
+
+	// LMI keeps its 200 when generation fails mid-stream and ends on finish_reason "error": an upstream failure, with
+	// the text that streamed before it.
+	failed := "{\"token\": {\"id\": 304, \"text\": \"Deep \", \"log_prob\": -0.05}}\n" +
+		"{\"token\": {\"id\": -1, \"text\": \"\", \"log_prob\": -1, \"special_token\": true}, \"generated_text\": \"\", \"details\": {\"finish_reason\": \"error\", \"generated_tokens\": null, \"inputs\": null}}\n"
+	r, err = Parse(in(`{"inputs":"x","stream":true}`, failed, true))
+	require.ErrorIs(t, err, ErrUpstreamStreamFailed)
+	require.Equal(t, "Deep ", *r.Response.TextCompletionResponse.Choices[0].Text)
+
+	// A cut stream's unfinished last event is an error, and the text before it is kept.
+	r, err = Parse(in(`{"inputs":"x","stream":true}`, tgi+"data:{\"index\":4,\"token\":{\"id\":3,\"text\":\" rocks", true))
+	require.ErrorIs(t, err, errInvalidEvent)
+	require.Equal(t, "Deep learning", *r.Response.TextCompletionResponse.Choices[0].Text)
+	// TGI keeps its 200 when generation fails mid-stream and sends an error event: an upstream failure, with the text
+	// that streamed before it.
+	r, err = Parse(in(`{"inputs":"x","stream":true}`, tgi+"data:{\"error\":\"Request failed during generation: Server error: out of memory\",\"error_type\":\"generation\"}\n\n", true))
+	require.ErrorIs(t, err, ErrUpstreamStreamFailed)
+	require.Equal(t, "Deep learning", *r.Response.TextCompletionResponse.Choices[0].Text)
+
+	// LMI dynamic batching streams each prompt's next piece in outputs, by prompt position.
+	r, err = Parse(in(`{"inputs":"x","stream":true}`, "{\"outputs\": [\"This\"]}\n{\"outputs\": [\" opportunity\"]}\n", true))
+	require.NoError(t, err)
+	require.Equal(t, "This opportunity", *r.Response.TextCompletionResponse.Choices[0].Text)
+	r, err = Parse(in(`{"inputs":["a","b"],"stream":true}`, "{\"outputs\": [\"a1\", \"b1\"]}\n{\"outputs\": [\"a2\", \"b2\"]}\n", true))
+	require.NoError(t, err)
+	require.Len(t, r.Response.TextCompletionResponse.Choices, 2)
+	require.Equal(t, "a1a2", *r.Response.TextCompletionResponse.Choices[0].Text)
+	require.Equal(t, "b1b2", *r.Response.TextCompletionResponse.Choices[1].Text)
+
+	// LMI's own formatter marks special tokens special_token; with no closing generated_text the tokens are joined.
+	native := "{\"token\": {\"id\": 1, \"text\": \"Deep \", \"log_prob\": -0.1}}\n" +
+		"{\"token\": {\"id\": 2, \"text\": \"learning\", \"log_prob\": -0.1}}\n" +
+		"{\"token\": {\"id\": 0, \"text\": \"</s>\", \"log_prob\": 0, \"special_token\": true}}\n"
+	r, err = Parse(in(`{"inputs":"x","stream":true}`, native, true))
+	require.NoError(t, err)
+	require.Equal(t, "Deep learning", *r.Response.TextCompletionResponse.Choices[0].Text)
+
+	// A stream with no event the readers know, such as a custom container's, is unreadable rather than empty text.
+	r, err = Parse(in(`{"inputs":"x","stream":true}`, "{\"chunk\": \"hello\"}\n{\"chunk\": \" world\"}\n", true))
+	require.ErrorIs(t, err, errNoEvents)
+	require.True(t, r == nil || r.Response == nil, "no response is invented for an unknown stream")
+}
+
+// TestParseGeminiInteractions verifies an Interactions create reads its system instruction and every input shape
+// (replayed function calls included), an
+// interaction reads its model output and function calls (not thoughts or the user input a GET repeats), and a stream
+// reads each step's start text and deltas in step order. Synthetic payloads.
+func TestParseGeminiInteractions(t *testing.T) {
+	request := `{"model":"gemini-3.8-flash","system_instruction":"be brief","input":[` +
+		`{"type":"user_input","content":[{"type":"text","text":"hi"}]},` +
+		`{"type":"model_output","content":[{"type":"text","text":"hello"}]},` +
+		`{"type":"function_call","id":"c1","name":"lookup","arguments":{"q":"answer"}},` +
+		`{"type":"function_result","name":"lookup","call_id":"c1","result":[{"type":"text","text":"42"}]},` +
+		`{"type":"future_step","text":"ignored"}]}`
+	r, err := Parse(Input{Provider: schemas.Gemini, Method: "POST", Path: "/v1beta/interactions", RequestBody: []byte(request)})
+	require.NoError(t, err)
+	require.Equal(t, schemas.ResponsesRequest, r.RequestType)
+	require.Equal(t, "be brief", *r.Request.ResponsesRequest.Params.Instructions)
+	input := r.Request.ResponsesRequest.Input
+	require.Len(t, input, 4)
+	require.Equal(t, "hi", *input[0].Content.ContentStr)
+	require.Equal(t, schemas.ResponsesInputMessageRoleAssistant, *input[1].Role)
+	require.Equal(t, `{"q":"answer"}`, *input[2].ResponsesToolMessage.Arguments)
+	require.Equal(t, "lookup", *input[2].ResponsesToolMessage.Name)
+	require.Equal(t, "42", *input[3].ResponsesToolMessage.Output.ResponsesToolCallOutputStr)
+
+	r, err = Parse(Input{Provider: schemas.Gemini, Method: "POST", Path: "/v1beta/interactions", RequestBody: []byte(`{"model":"m","input":"plain"}`)})
+	require.NoError(t, err)
+	require.Equal(t, "plain", *r.Request.ResponsesRequest.Input[0].Content.ContentStr)
+
+	interaction := `{"id":"v1_1","object":"interaction","status":"completed","steps":[` +
+		`{"type":"user_input","content":[{"type":"text","text":"question"}]},` +
+		`{"type":"thought","summary":[{"type":"text","text":"thinking"}]},` +
+		`{"type":"function_call","id":"c1","name":"lookup","arguments":{"q":"x"}},` +
+		`{"type":"model_output","content":[{"type":"text","text":"answer"}]}]}`
+	r, err = Parse(Input{Provider: schemas.Gemini, Method: "GET", Path: "/v1beta/interactions/v1_1", StatusCode: 200, ResponseBody: []byte(interaction)})
+	require.NoError(t, err)
+	output := r.Response.ResponsesResponse.Output
+	require.Len(t, output, 2)
+	require.Equal(t, `{"q":"x"}`, *output[0].ResponsesToolMessage.Arguments)
+	require.Equal(t, "answer", *output[1].Content.ContentBlocks[0].Text)
+
+	stream := "event: interaction.created\ndata: {\"interaction\":{\"id\":\"v1_1\",\"status\":\"in_progress\"},\"event_type\":\"interaction.created\"}\n\n" +
+		"event: step.start\ndata: {\"index\":0,\"step\":{\"type\":\"thought\"},\"event_type\":\"step.start\"}\n\n" +
+		"event: step.delta\ndata: {\"index\":0,\"delta\":{\"type\":\"thought_summary\",\"content\":{\"type\":\"text\",\"text\":\"hmm\"}},\"event_type\":\"step.delta\"}\n\n" +
+		"event: step.start\ndata: {\"index\":1,\"step\":{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"1, \"}]},\"event_type\":\"step.start\"}\n\n" +
+		"event: step.delta\ndata: {\"index\":1,\"delta\":{\"type\":\"text\",\"text\":\"2, 3\"},\"event_type\":\"step.delta\"}\n\n" +
+		"event: interaction.completed\ndata: {\"interaction\":{\"id\":\"v1_1\",\"status\":\"completed\"},\"event_type\":\"interaction.completed\"}\n\n" +
+		"event: done\ndata: [DONE]\n\n"
+	r, err = Parse(Input{Provider: schemas.Gemini, Method: "POST", Path: "/v1beta/interactions", StatusCode: 200, ResponseBody: []byte(stream), Stream: true})
+	require.NoError(t, err)
+	output = r.Response.ResponsesResponse.Output
+	require.Len(t, output, 1)
+	require.Equal(t, "1, 2, 3", *output[0].Content.ContentBlocks[0].Text)
+
+	// Vertex sends a function call's argument fragments as partial_arguments.
+	vertex := "event: step.start\ndata: {\"index\":0,\"step\":{\"type\":\"function_call\",\"id\":\"c1\",\"name\":\"send\"},\"event_type\":\"step.start\"}\n\n" +
+		"event: step.delta\ndata: {\"index\":0,\"delta\":{\"type\":\"arguments_delta\",\"partial_arguments\":\"{\\\"to\\\":\\\"al\"},\"event_type\":\"step.delta\"}\n\n" +
+		"event: step.delta\ndata: {\"index\":0,\"delta\":{\"type\":\"arguments_delta\",\"partial_arguments\":\"ex@example.com\\\"}\"},\"event_type\":\"step.delta\"}\n\n"
+	r, err = Parse(Input{Provider: schemas.Vertex, Method: "POST", Path: "/v1beta1/projects/p/locations/global/interactions", StatusCode: 200, ResponseBody: []byte(vertex), Stream: true})
+	require.NoError(t, err)
+	require.Equal(t, "send", *r.Response.ResponsesResponse.Output[0].ResponsesToolMessage.Name)
+	require.Equal(t, `{"to":"alex@example.com"}`, *r.Response.ResponsesResponse.Output[0].ResponsesToolMessage.Arguments)
+
+	// A cut stream's unfinished last event is an error, and the text before it is kept.
+	cut := stream[:strings.Index(stream, "event: interaction.completed")] + "event: step.delta\ndata: {\"index\":1,\"delta\":{\"type\":\"text\",\"text\":\", 4\n\n"
+	r, err = Parse(Input{Provider: schemas.Gemini, Method: "POST", Path: "/v1beta/interactions", StatusCode: 200, ResponseBody: []byte(cut), Stream: true})
+	require.ErrorIs(t, err, errInvalidEvent)
+	require.Equal(t, "1, 2, 3", *r.Response.ResponsesResponse.Output[0].Content.ContentBlocks[0].Text)
+}
+
+// TestParseBedrockAgent verifies an InvokeAgent body reads as a chat turn of its history, returned tool results and
+// input text, and that its event-stream answer has no text form. Synthetic payloads.
+func TestParseBedrockAgent(t *testing.T) {
+	body := `{"inputText":"what now","sessionState":{"sessionAttributes":{"k":"v"},` +
+		`"conversationHistory":{"messages":[{"role":"user","content":[{"text":"earlier"}]},{"role":"assistant","content":[{"text":"reply"}]}]},` +
+		`"returnControlInvocationResults":[{"functionResult":{"actionGroup":"g","function":"f","responseBody":{"TEXT":{"body":"rainy"}}}}]}}`
+	r, err := Parse(Input{Provider: schemas.Bedrock, Method: "POST", Path: "/agents/A/agentAliases/B/sessions/c/text", RequestBody: []byte(body),
+		StatusCode: 200, ResponseBody: []byte("\x00\x00\x00\x10binary"), Stream: true})
+	require.NoError(t, err)
+	require.Equal(t, schemas.ChatCompletionRequest, r.RequestType)
+	var texts []string
+	for _, message := range r.Request.ChatRequest.Input {
+		texts = append(texts, string(message.Role)+":"+*message.Content.ContentStr)
+	}
+	require.Equal(t, []string{"user:earlier", "assistant:reply", "tool:rainy", "user:what now"}, texts)
+	require.Nil(t, r.Response, "the agent's event-stream answer has no text form")
+}
+
+// TestRedactStreamBodyNewFormats verifies SageMaker token streams (SSE and JSON lines) and Interactions streams are
+// redacted across the events a value is split over, and read back as the redacted text. Synthetic payloads.
+func TestRedactStreamBodyNewFormats(t *testing.T) {
+	replacements := map[string]string{"alice@example.com": "[EMAIL]"}
+	cases := []struct {
+		name    string
+		in      Input
+		format  schemas.RawResponseFormat
+		body    string
+		want    string
+		readOut func(*Result) string
+	}{
+		{
+			name:   "sagemaker tgi sse",
+			in:     Input{Provider: schemas.SageMaker, Method: "POST", Path: "/endpoints/e/invocations-response-stream"},
+			format: schemas.RawResponseFormatSageMakerStreamEvent,
+			body: "data:{\"token\":{\"text\":\"mail alice@\",\"special\":false},\"generated_text\":null}\n\n" +
+				"data:{\"token\":{\"text\":\"example.com\",\"special\":false},\"generated_text\":null}\n\n",
+			want:    "mail [EMAIL]",
+			readOut: func(r *Result) string { return *r.Response.TextCompletionResponse.Choices[0].Text },
+		},
+		{
+			name:   "sagemaker lmi json lines",
+			in:     Input{Provider: schemas.SageMaker, Method: "POST", Path: "/endpoints/e/invocations-response-stream"},
+			format: schemas.RawResponseFormatSageMakerStreamEvent,
+			body: "{\"token\": {\"text\": \"mail alice@\"}}\n" +
+				"{\"token\": {\"text\": \"example.com\"}, \"generated_text\": \"mail alice@example.com\"}\n",
+			want:    "mail [EMAIL]",
+			readOut: func(r *Result) string { return *r.Response.TextCompletionResponse.Choices[0].Text },
+		},
+		{
+			name:   "sagemaker tgi chat labelled text_completion",
+			in:     Input{Provider: schemas.SageMaker, Method: "POST", Path: "/endpoints/e/invocations-response-stream"},
+			format: schemas.RawResponseFormatSageMakerStreamEvent,
+			body: "data:{\"object\":\"text_completion\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"mail alice@\"}}]}\n\n" +
+				"data:{\"object\":\"text_completion\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"example.com\"},\"finish_reason\":\"stop\"}]}\n\n",
+			want:    "mail [EMAIL]",
+			readOut: func(r *Result) string { return *r.Response.ChatResponse.Choices[0].Message.Content.ContentStr },
+		},
+		{
+			name:    "sagemaker lmi outputs",
+			in:      Input{Provider: schemas.SageMaker, Method: "POST", Path: "/endpoints/e/invocations-response-stream"},
+			format:  schemas.RawResponseFormatSageMakerStreamEvent,
+			body:    "{\"outputs\": [\"mail alice@\"]}\n{\"outputs\": [\"example.com\"]}\n",
+			want:    "mail [EMAIL]",
+			readOut: func(r *Result) string { return *r.Response.TextCompletionResponse.Choices[0].Text },
+		},
+		{
+			name:   "sagemaker lmi native special token",
+			in:     Input{Provider: schemas.SageMaker, Method: "POST", Path: "/endpoints/e/invocations-response-stream"},
+			format: schemas.RawResponseFormatSageMakerStreamEvent,
+			body: "{\"token\": {\"text\": \"mail alice@\"}}\n" +
+				"{\"token\": {\"text\": \"<|eot_id|>\", \"special_token\": true}}\n" +
+				"{\"token\": {\"text\": \"example.com\"}}\n",
+			want:    "mail [EMAIL]",
+			readOut: func(r *Result) string { return *r.Response.TextCompletionResponse.Choices[0].Text },
+		},
+		{
+			name:   "vertex interactions partial_arguments",
+			in:     Input{Provider: schemas.Vertex, Method: "POST", Path: "/v1beta1/projects/p/locations/global/interactions"},
+			format: schemas.RawResponseFormatGeminiInteractionsStreamEvent,
+			body: "event: step.start\ndata: {\"index\":0,\"step\":{\"type\":\"function_call\",\"id\":\"c1\",\"name\":\"send\"},\"event_type\":\"step.start\"}\n\n" +
+				"event: step.delta\ndata: {\"index\":0,\"delta\":{\"type\":\"arguments_delta\",\"partial_arguments\":\"{\\\"to\\\":\\\"alice@\"},\"event_type\":\"step.delta\"}\n\n" +
+				"event: step.delta\ndata: {\"index\":0,\"delta\":{\"type\":\"arguments_delta\",\"partial_arguments\":\"example.com\\\"}\"},\"event_type\":\"step.delta\"}\n\n",
+			want:    `{"to":"[EMAIL]"}`,
+			readOut: func(r *Result) string { return *r.Response.ResponsesResponse.Output[0].ResponsesToolMessage.Arguments },
+		},
+		{
+			name:   "gemini interactions",
+			in:     Input{Provider: schemas.Gemini, Method: "POST", Path: "/v1beta/interactions"},
+			format: schemas.RawResponseFormatGeminiInteractionsStreamEvent,
+			body: "event: step.start\ndata: {\"index\":0,\"step\":{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"mail ali\"}]},\"event_type\":\"step.start\"}\n\n" +
+				"event: step.delta\ndata: {\"index\":0,\"delta\":{\"type\":\"text\",\"text\":\"ce@example.com\"},\"event_type\":\"step.delta\"}\n\n",
+			want:    "mail [EMAIL]",
+			readOut: func(r *Result) string { return *r.Response.ResponsesResponse.Output[0].Content.ContentBlocks[0].Text },
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.format, Classify(tc.in.Provider, "", tc.in.Method, tc.in.Path).StreamFormat())
+			redacted, ok := RedactStreamBody([]byte(tc.body), tc.format, replacements)
+			require.True(t, ok)
+			require.NotContains(t, string(redacted), "alice@")
+			tc.in.StatusCode, tc.in.ResponseBody, tc.in.Stream = 200, redacted, true
+			r, err := Parse(tc.in)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, tc.readOut(r))
+		})
 	}
 }

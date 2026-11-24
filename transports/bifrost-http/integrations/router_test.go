@@ -1713,6 +1713,10 @@ func TestRegisterPassthroughTextRewriters(t *testing.T) {
 		{"openai chat", passthroughparse.Route{Wire: schemas.OpenAI, RequestType: schemas.ChatCompletionRequest}, true},
 		{"openai responses", passthroughparse.Route{Wire: schemas.OpenAI, RequestType: schemas.ResponsesRequest}, true},
 		{"openai embeddings", passthroughparse.Route{Wire: schemas.OpenAI, RequestType: schemas.EmbeddingRequest}, false},
+		{"gemini interactions", passthroughparse.Route{Wire: passthroughparse.WireGeminiInteractions, RequestType: schemas.ResponsesRequest}, true},
+		{"runware tasks", passthroughparse.Route{Wire: schemas.Runware}, true},
+		{"sagemaker invocations", passthroughparse.Route{Wire: schemas.SageMaker}, true},
+		{"bedrock agent", passthroughparse.Route{Wire: schemas.Bedrock}, true},
 		{"untyped route", passthroughparse.Route{}, false},
 	}
 	for _, tc := range cases {
@@ -1721,6 +1725,76 @@ func TestRegisterPassthroughTextRewriters(t *testing.T) {
 			registerPassthroughTextRewriters(ctx, tc.route)
 			_, registered := ctx.Value(schemas.BifrostContextKeyRawRequestBodyTextRewriter).(schemas.RawRequestBodyTextRewriter)
 			require.Equal(t, tc.want, registered)
+		})
+	}
+}
+
+// TestRewritePassthroughOnlyRawRequestBodies verifies the Runware, SageMaker and Bedrock agent rewriters change only the
+// text fields passthroughparse reads, and keep every other field, unknown ones included, as sent. Synthetic payloads.
+func TestRewritePassthroughOnlyRawRequestBodies(t *testing.T) {
+	replacements := map[string]string{"alice@example.com": "[EMAIL]"}
+	cases := []struct {
+		name      string
+		rewrite   schemas.RawRequestBodyTextRewriter
+		body      string
+		redacted  []string
+		untouched map[string]string
+	}{
+		{
+			name:    "runware tasks",
+			rewrite: rewriteRunwareRawRequestBody,
+			body: `[{"taskType":"textInference","taskUUID":"t1","settings":{"systemPrompt":"sys alice@example.com"},"messages":[{"role":"user","content":"hi alice@example.com"}]},` +
+				`{"taskType":"imageInference","taskUUID":"t2","positivePrompt":"draw alice@example.com","negativePrompt":"alice@example.com"},` +
+				`{"taskType":"imageUpscale","taskUUID":"t3","inputImage":"alice@example.com"}]`,
+			redacted:  []string{"0.settings.systemPrompt", "0.messages.0.content", "1.positivePrompt"},
+			untouched: map[string]string{"1.negativePrompt": "alice@example.com", "2.inputImage": "alice@example.com", "0.taskUUID": "t1"},
+		},
+		{
+			name:      "runware single task",
+			rewrite:   rewriteRunwareRawRequestBody,
+			body:      `{"taskType":"videoInference","positivePrompt":"film alice@example.com","futureField":"alice@example.com"}`,
+			redacted:  []string{"positivePrompt"},
+			untouched: map[string]string{"futureField": "alice@example.com"},
+		},
+		{
+			name:      "sagemaker inputs",
+			rewrite:   rewriteSageMakerRawRequestBody,
+			body:      `{"inputs":"say alice@example.com","parameters":{"stop":["alice@example.com"]}}`,
+			redacted:  []string{"inputs"},
+			untouched: map[string]string{"parameters.stop.0": "alice@example.com"},
+		},
+		{
+			name:     "sagemaker input list",
+			rewrite:  rewriteSageMakerRawRequestBody,
+			body:     `{"inputs":["a alice@example.com","b alice@example.com"]}`,
+			redacted: []string{"inputs.0", "inputs.1"},
+		},
+		{
+			name:      "sagemaker messages",
+			rewrite:   rewriteSageMakerRawRequestBody,
+			body:      `{"messages":[{"role":"user","content":"hi alice@example.com"}],"futureField":"alice@example.com"}`,
+			redacted:  []string{"messages.0.content"},
+			untouched: map[string]string{"futureField": "alice@example.com"},
+		},
+		{
+			name:    "bedrock agent",
+			rewrite: rewriteBedrockAgentRawRequestBody,
+			body: `{"inputText":"mail alice@example.com","sessionState":{"sessionAttributes":{"k":"alice@example.com"},` +
+				`"conversationHistory":{"messages":[{"role":"user","content":[{"text":"earlier alice@example.com"}]}]},` +
+				`"returnControlInvocationResults":[{"functionResult":{"actionGroup":"g","function":"f","responseBody":{"TEXT":{"body":"result alice@example.com"}}}}]}}`,
+			redacted: []string{
+				"inputText",
+				"sessionState.conversationHistory.messages.0.content.0.text",
+				"sessionState.returnControlInvocationResults.0.functionResult.responseBody.TEXT.body",
+			},
+			untouched: map[string]string{"sessionState.sessionAttributes.k": "alice@example.com"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := tc.rewrite([]byte(tc.body), replacements)
+			require.NoError(t, err)
+			assertRawPaths(t, got, tc.redacted, tc.untouched)
 		})
 	}
 }

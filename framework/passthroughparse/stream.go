@@ -35,6 +35,10 @@ var ErrUpstreamStreamFailed = errors.New("upstream ended the stream with an erro
 // exactly like a typed one.
 func parseStreamResponse(format wireFormat, requestType schemas.RequestType, body []byte) (*schemas.BifrostResponse, error) {
 	switch format {
+	case wireGeminiInteractions:
+		return assembleInteractionsStream(body)
+	case wireSageMaker:
+		return assembleSageMakerStream(body)
 	case wireOpenAI:
 		switch requestType {
 		case schemas.ChatCompletionRequest:
@@ -57,8 +61,19 @@ func parseStreamResponse(format wireFormat, requestType schemas.RequestType, bod
 }
 
 // forEachSSEEvent calls fn with every SSE event's data payload in order, skipping the [DONE]
-// terminator. Comments and id/retry fields are dropped by the shared reader.
+// terminator. Comments and id/retry fields are dropped by the shared reader. A JSON-lines body (see
+// isJSONLines) has no event names: each non-empty line is one payload.
 func forEachSSEEvent(body []byte, fn func(eventType string, data []byte) error) error {
+	if isJSONLines(body) {
+		for _, line := range bytes.Split(body, []byte("\n")) {
+			if line = bytes.TrimSpace(line); len(line) > 0 {
+				if err := fn("", line); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
 	reader := providerUtils.GetSSEEventReader(nil, bytes.NewReader(body))
 	for {
 		eventType, data, err := reader.ReadEvent()
@@ -213,6 +228,10 @@ func assembleOpenAITextStream(body []byte) (*schemas.BifrostResponse, error) {
 }
 
 var errNoEvents = errors.New("stream body carried no decodable events")
+
+// errInvalidEvent ends a stream read at an event that is not valid JSON, such as one a cut stream left unfinished; what
+// was read before it is kept.
+var errInvalidEvent = errors.New("stream event is not valid JSON")
 
 // responsesEventDecoder turns one recorded event into zero or more Responses stream events.
 type responsesEventDecoder func(eventType string, data []byte) ([]*schemas.BifrostResponsesStreamResponse, error)
@@ -430,7 +449,31 @@ func streamPayloadSpans(body []byte) ([]payloadSpan, bool) {
 	if trimmed := bytes.TrimSpace(body); len(trimmed) > 0 && trimmed[0] == '[' {
 		return jsonArrayPayloadSpans(body), true
 	}
+	if isJSONLines(body) {
+		return jsonLinesPayloadSpans(body), true
+	}
 	return ssePayloadSpans(body)
+}
+
+// isJSONLines reports whether a recorded stream is JSON lines, one object per line, as LMI containers stream by
+// default, rather than SSE, whose lines start with a field name or a comment.
+func isJSONLines(body []byte) bool {
+	trimmed := bytes.TrimLeft(body, " \t\r\n")
+	return len(trimmed) > 0 && trimmed[0] == '{'
+}
+
+// jsonLinesPayloadSpans frames a JSON-lines body line by line, the way forEachSSEEvent reads it.
+func jsonLinesPayloadSpans(body []byte) []payloadSpan {
+	var spans []payloadSpan
+	for start := 0; start < len(body); {
+		end := len(body)
+		if newline := bytes.IndexByte(body[start:], '\n'); newline >= 0 {
+			end = start + newline
+		}
+		spans = appendObjectSpan(spans, body, payloadSpan{start: start, end: end})
+		start = end + 1
+	}
+	return spans
 }
 
 // jsonArrayPayloadSpans frames a JSON array the way assembleGeminiJSONArray does: element by element,
@@ -507,3 +550,162 @@ func appendObjectSpan(spans []payloadSpan, body []byte, span payloadSpan) []payl
 	}
 	return spans
 }
+
+// assembleInteractionsStream rebuilds an Interactions stream: each model output step's text, from the text its start
+// event carries and its text deltas, and each function call step's argument deltas, in step order. Thought summaries
+// are not read. An error event ends the stream as an upstream failure.
+func assembleInteractionsStream(body []byte) (*schemas.BifrostResponse, error) {
+	type stepState struct {
+		kind, id, name string
+		text, args     strings.Builder
+	}
+	steps := map[int]*stepState{}
+	stepAt := func(index int) *stepState {
+		if steps[index] == nil {
+			steps[index] = &stepState{}
+		}
+		return steps[index]
+	}
+	seen := false
+	err := forEachSSEEvent(body, func(eventType string, data []byte) error {
+		if !gjson.ValidBytes(data) {
+			return errInvalidEvent
+		}
+		seen = true
+		event := gjson.ParseBytes(data)
+		if kind := event.Get("event_type").String(); kind != "" {
+			eventType = kind
+		}
+		switch eventType {
+		case "step.start":
+			step, state := event.Get("step"), stepAt(int(event.Get("index").Int()))
+			state.kind, state.id, state.name = step.Get("type").String(), step.Get("id").String(), step.Get("name").String()
+			if state.kind == "model_output" {
+				step.Get("content").ForEach(func(_, part gjson.Result) bool {
+					if part.Get("type").String() == "text" {
+						state.text.WriteString(part.Get("text").String())
+					}
+					return true
+				})
+			}
+		case "step.delta":
+			delta, state := event.Get("delta"), stepAt(int(event.Get("index").Int()))
+			switch delta.Get("type").String() {
+			case "text":
+				state.text.WriteString(delta.Get("text").String())
+			case "arguments_delta":
+				// The Gemini API sends the fragment as arguments, Vertex as partial_arguments.
+				arguments := delta.Get("arguments")
+				if !arguments.Exists() {
+					arguments = delta.Get("partial_arguments")
+				}
+				state.args.WriteString(arguments.String())
+			}
+		case "error":
+			return fmt.Errorf("%w: %s", ErrUpstreamStreamFailed, event.Get("error.message").String())
+		}
+		return nil
+	})
+	if !seen {
+		return nil, errors.Join(errNoEvents, err)
+	}
+	var output []schemas.ResponsesMessage
+	indexes := make([]int, 0, len(steps))
+	for index := range steps {
+		indexes = append(indexes, index)
+	}
+	slices.Sort(indexes)
+	for _, index := range indexes {
+		state := steps[index]
+		switch {
+		case state.kind == "function_call":
+			output = append(output, responsesFunctionCall(state.id, state.name, state.args.String()))
+		case (state.kind == "model_output" || state.kind == "") && state.text.Len() > 0:
+			output = append(output, responsesOutputMessage([]string{state.text.String()}))
+		}
+	}
+	return &schemas.BifrostResponse{ResponsesResponse: &schemas.BifrostResponsesResponse{Output: output}}, err
+}
+
+// assembleSageMakerStream rebuilds a SageMaker container stream, SSE or JSON lines: OpenAI chat or completion chunks
+// with the OpenAI assemblers, TGI and LMI token events, whose token texts are joined, special tokens skipped, unless
+// the closing event repeats the whole generated text, or LMI dynamic-batch {"outputs": [...]} events, whose pieces are
+// joined per prompt. A TGI error event or LMI's error finish ends it as an upstream failure, and a stream with no event
+// of these kinds, such as a custom container's, is reported as unreadable.
+func assembleSageMakerStream(body []byte) (*schemas.BifrostResponse, error) {
+	var first gjson.Result
+	_ = forEachSSEEvent(body, func(_ string, data []byte) error {
+		first = gjson.ParseBytes(data)
+		return errStopReading
+	})
+	switch {
+	case !first.Exists():
+		return nil, errNoEvents
+	case first.Get("choices").Exists() && schemas.IsTextCompletionChoice(first, "delta"):
+		return assembleOpenAITextStream(body)
+	case first.Get("choices").Exists():
+		return assembleOpenAIChatStream(body)
+	}
+	var text strings.Builder
+	var outputs []*strings.Builder
+	generated, recognized := "", false
+	err := forEachSSEEvent(body, func(_ string, data []byte) error {
+		if !gjson.ValidBytes(data) {
+			return errInvalidEvent
+		}
+		event := gjson.ParseBytes(data)
+		// TGI and LMI keep the 200 they started with when generation fails: TGI sends an error event, and LMI ends the
+		// stream on an error finish.
+		if failure := event.Get("error"); failure.Exists() && failure.Type != gjson.Null {
+			recognized = true
+			return fmt.Errorf("%w: %s", ErrUpstreamStreamFailed, failure.String())
+		}
+		if event.Get("details.finish_reason").String() == "error" {
+			recognized = true
+			return fmt.Errorf("%w: the model server reported a generation error", ErrUpstreamStreamFailed)
+		}
+		if token := event.Get("token"); token.Exists() {
+			recognized = true
+			// TGI and LMI's TGI-compatible formatter mark a special token special; LMI's own formatter marks it special_token.
+			if !token.Get("special").Bool() && !token.Get("special_token").Bool() {
+				text.WriteString(token.Get("text").String())
+			}
+		}
+		if whole := event.Get("generated_text"); whole.Exists() {
+			recognized = true
+			if whole.Type == gjson.String {
+				generated = whole.Str
+			}
+		}
+		if pieces := event.Get("outputs"); pieces.IsArray() {
+			recognized = true
+			prompt := 0
+			pieces.ForEach(func(_, piece gjson.Result) bool {
+				if prompt == len(outputs) {
+					outputs = append(outputs, &strings.Builder{})
+				}
+				outputs[prompt].WriteString(piece.String())
+				prompt++
+				return true
+			})
+		}
+		return nil
+	})
+	if !recognized {
+		return nil, errors.Join(errNoEvents, err)
+	}
+	if len(outputs) > 0 {
+		texts := make([]string, len(outputs))
+		for i, output := range outputs {
+			texts[i] = output.String()
+		}
+		return textCompletionResponse(texts), err
+	}
+	if generated == "" {
+		generated = text.String()
+	}
+	return textCompletionResponse([]string{generated}), err
+}
+
+// errStopReading ends a forEachSSEEvent walk after the event a caller needed.
+var errStopReading = errors.New("stop reading")
