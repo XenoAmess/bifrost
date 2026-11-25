@@ -885,6 +885,10 @@ func (p *ProviderConfig) Redacted() *ProviderConfig {
 			vertexConfig.ForceSingleRegion = key.VertexKeyConfig.ForceSingleRegion
 			vertexConfig.UseSessionRouting = key.VertexKeyConfig.UseSessionRouting
 			vertexConfig.AWSWorkloadIdentity = key.VertexKeyConfig.AWSWorkloadIdentity.Redacted()
+			// Add back gcs config
+			if key.VertexKeyConfig.BatchGCSConfig != nil {
+				vertexConfig.BatchGCSConfig = key.VertexKeyConfig.BatchGCSConfig
+			}
 			redactedConfig.Keys[i].VertexKeyConfig = vertexConfig
 		}
 

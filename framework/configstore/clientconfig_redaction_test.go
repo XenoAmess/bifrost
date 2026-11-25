@@ -3,6 +3,7 @@ package configstore
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -701,4 +702,34 @@ func mustMarshal(t *testing.T, v any) []byte {
 	b, err := json.Marshal(v)
 	require.NoError(t, err)
 	return b
+}
+
+// TestProviderConfigRedacted_KeepsVertexBatchGCSConfig pins that a Vertex key's bucket list is
+// returned as stored: bucket names are plain identifiers, and a client that reads the redacted
+// key and saves it back must not lose the list.
+func TestProviderConfigRedacted_KeepsVertexBatchGCSConfig(t *testing.T) {
+	buckets := []schemas.GCSBucketConfig{{BucketName: "team-batch", Prefix: "jobs/"}, {BucketName: "team-files"}}
+	cfg := ProviderConfig{Keys: []schemas.Key{{
+		ID: "k1", Name: "vertex-buckets",
+		VertexKeyConfig: &schemas.VertexKeyConfig{
+			ProjectID:      *schemas.NewSecretVar("my-gcp-project"),
+			Region:         *schemas.NewSecretVar("us-central1"),
+			BatchGCSConfig: &schemas.BatchGCSConfig{Buckets: buckets},
+		},
+	}, {
+		ID: "k2", Name: "vertex-open",
+		VertexKeyConfig: &schemas.VertexKeyConfig{ProjectID: *schemas.NewSecretVar("my-gcp-project")},
+	}}}
+
+	// Redaction hands back the same list, so the expectation is a copy taken first: a rewrite of
+	// a name or prefix in place would otherwise change both sides of the comparison.
+	want := slices.Clone(buckets)
+	redacted := cfg.Redacted()
+	if redacted.Keys[0].VertexKeyConfig == nil || redacted.Keys[0].VertexKeyConfig.BatchGCSConfig == nil {
+		t.Fatalf("the bucket list must survive redaction, got %+v", redacted.Keys[0].VertexKeyConfig)
+	}
+	assert.Equal(t, want, redacted.Keys[0].VertexKeyConfig.BatchGCSConfig.Buckets)
+	if redacted.Keys[1].VertexKeyConfig.BatchGCSConfig != nil {
+		t.Fatalf("a key without a bucket list must stay without one, got %+v", redacted.Keys[1].VertexKeyConfig.BatchGCSConfig)
+	}
 }

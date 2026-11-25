@@ -257,6 +257,11 @@ func tableKeyFromSchemaKey(provider tables.TableProvider, key schemas.Key) (tabl
 			return tables.TableKey{}, err
 		}
 		dbKey.VertexAWSWorkloadIdentityJSON = wif
+		batchGCS, err := tables.MarshalVertexBatchGCSConfigJSON(key.VertexKeyConfig.BatchGCSConfig)
+		if err != nil {
+			return tables.TableKey{}, err
+		}
+		dbKey.VertexBatchGCSConfigJSON = batchGCS
 	}
 
 	if key.BedrockKeyConfig != nil {
@@ -915,6 +920,11 @@ func (s *RDBConfigStore) UpdateProvidersConfig(ctx context.Context, providers ma
 					return err
 				}
 				dbKey.VertexAWSWorkloadIdentityJSON = wif
+				batchGCS, err := tables.MarshalVertexBatchGCSConfigJSON(key.VertexKeyConfig.BatchGCSConfig)
+				if err != nil {
+					return err
+				}
+				dbKey.VertexBatchGCSConfigJSON = batchGCS
 			}
 
 			// Handle Bedrock config
@@ -1216,6 +1226,11 @@ func (s *RDBConfigStore) UpdateProvider(ctx context.Context, provider schemas.Mo
 				return err
 			}
 			dbKey.VertexAWSWorkloadIdentityJSON = wif
+			batchGCS, err := tables.MarshalVertexBatchGCSConfigJSON(key.VertexKeyConfig.BatchGCSConfig)
+			if err != nil {
+				return err
+			}
+			dbKey.VertexBatchGCSConfigJSON = batchGCS
 		}
 
 		// Handle Bedrock config
@@ -1386,6 +1401,11 @@ func (s *RDBConfigStore) AddProvider(ctx context.Context, provider schemas.Model
 				return err
 			}
 			dbKey.VertexAWSWorkloadIdentityJSON = wif
+			batchGCS, err := tables.MarshalVertexBatchGCSConfigJSON(key.VertexKeyConfig.BatchGCSConfig)
+			if err != nil {
+				return err
+			}
+			dbKey.VertexBatchGCSConfigJSON = batchGCS
 		}
 		// Handle Bedrock config
 		if key.BedrockKeyConfig != nil {
