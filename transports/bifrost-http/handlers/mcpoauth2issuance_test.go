@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math"
 	"math/big"
 	"net/url"
 	"path/filepath"
@@ -1746,4 +1747,70 @@ func TestConsentFlowSubmit_ConcurrentSubmitsMintOneCode(t *testing.T) {
 	}.Encode())
 	h.handleToken(exchange)
 	assert.Equal(t, fasthttp.StatusOK, exchange.Response.StatusCode(), string(exchange.Response.Body()))
+}
+
+// Dynamic client registration is open by design (RFC 7591), and every accepted
+// registration is a stored row. One address can register a bounded number of
+// clients per window; past that it is told to retry later and nothing is stored.
+func TestHandleRegister_BoundsRegistrationsPerAddress(t *testing.T) {
+	h, store, _ := newIssuanceHandler(t)
+	h.registerLimiter = newIPRateLimiter(3, time.Hour)
+
+	const valid = `{"client_name":"limited","redirect_uris":["http://127.0.0.1:1234/cb"]}`
+	register := func(body string) *fasthttp.RequestCtx {
+		var req fasthttp.Request
+		req.Header.SetMethod(fasthttp.MethodPost)
+		req.Header.SetContentType("application/json")
+		req.SetBodyString(body)
+		ctx := initCtx(&req)
+		h.handleRegister(ctx)
+		return ctx
+	}
+	storedClients := func() int64 {
+		var n int64
+		require.NoError(t, store.DB().Model(&configtables.TableOAuth2Client{}).Count(&n).Error)
+		return n
+	}
+
+	// A request that is not a valid registration is answered 400 and does not count.
+	for range 5 {
+		require.Equal(t, fasthttp.StatusBadRequest, register(`{"client_name":"no redirect uris"}`).Response.StatusCode())
+	}
+	for i := range 3 {
+		ctx := register(valid)
+		require.Equal(t, fasthttp.StatusCreated, ctx.Response.StatusCode(), "registration %d: %s", i+1, ctx.Response.Body())
+	}
+	require.EqualValues(t, 3, storedClients())
+
+	refused := register(valid)
+	require.Equal(t, fasthttp.StatusTooManyRequests, refused.Response.StatusCode(), string(refused.Response.Body()))
+	assert.NotEmpty(t, string(refused.Response.Header.Peek("Retry-After")))
+	assert.NotContains(t, string(refused.Response.Body()), "client_id")
+	assert.EqualValues(t, 3, storedClients(), "a refused registration stores nothing")
+}
+
+// The registration limiter runs on every valid registration. The benchmark covers an address
+// inside its allowance and one past it; both are a map lookup under one mutex.
+func BenchmarkRegisterLimiterAllow(b *testing.B) {
+	now := time.Now()
+	b.Run("within the limit", func(b *testing.B) {
+		// The allowance cannot be sized from b.N: with b.Loop it is only final after the loop.
+		l := newIPRateLimiter(math.MaxInt, time.Hour)
+		b.ReportAllocs()
+		for b.Loop() {
+			if !l.allow("203.0.113.10", now) {
+				b.Fatal("a call inside the allowance was refused")
+			}
+		}
+	})
+	b.Run("past the limit", func(b *testing.B) {
+		l := newIPRateLimiter(1, time.Hour)
+		l.allow("203.0.113.10", now)
+		b.ReportAllocs()
+		for b.Loop() {
+			if l.allow("203.0.113.10", now) {
+				b.Fatal("a call past the allowance was allowed")
+			}
+		}
+	})
 }
