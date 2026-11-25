@@ -1189,6 +1189,17 @@ func (h *MCPSessionsHandler) flowStart(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, fasthttp.StatusInternalServerError, "Failed to build upstream authorize URL")
 		return
 	}
+	if err := bindOAuthFlowToBrowser(ctx, h.store.ConfigStore, flowID, upstreamURL, flow.ExpiresAt); err != nil {
+		if errors.Is(err, schemas.ErrOAuth2FlowNotPending) {
+			logger.Debug("[mcp/sessions] flow start refused (no longer pending): flow=%s", flowID)
+			SendError(ctx, fasthttp.StatusGone, "OAuth flow is no longer pending; restart authentication")
+			return
+		}
+		// Without the binding the callback would refuse this browser, so no URL is handed out.
+		logger.Error("[mcp/sessions] flow start failed, the browser could not be bound: flow=%s err=%v", flowID, err)
+		SendError(ctx, fasthttp.StatusInternalServerError, "Failed to start authentication")
+		return
+	}
 	SendJSON(ctx, map[string]any{"authorize_url": upstreamURL})
 }
 
