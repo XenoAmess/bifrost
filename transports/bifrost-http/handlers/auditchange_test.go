@@ -1259,6 +1259,26 @@ func TestCommitPoint_ModelRouterUpdateFallbackKeepsStoredTargets(t *testing.T) {
 	}
 }
 
+func TestCommitPoint_ModelRouterCreateFallbackHasDefaultRouting(t *testing.T) {
+	h, manager, store := modelRouterHandler(t)
+	manager.serveErr = errors.New("plugin is restarting")
+
+	ctx := runWithParams(h.createModelRouter, routerBody("support", "Support"), nil)
+	requireStatus(t, ctx, fasthttp.StatusInternalServerError)
+	change := requireCommitPointChange(t, ctx, "model_router.created", "name", "Support")
+	saved, err := store.GetModelRouter(context.Background(), "support")
+	if err != nil || saved.Routing == nil {
+		t.Fatalf("stored router = %+v, %v", saved, err)
+	}
+	var after configstore.ModelRouter
+	if err := json.Unmarshal(change.After, &after); err != nil {
+		t.Fatalf("decode after: %v", err)
+	}
+	if !reflect.DeepEqual(after.Routing, saved.Routing) {
+		t.Fatalf("after = %s, want the stored routing %+v", change.After, *saved.Routing)
+	}
+}
+
 func TestCommitPoint_ModelRouterResetFallbackKeepsTargetsAndRouting(t *testing.T) {
 	h, manager, _ := modelRouterHandler(t)
 	modelRouterOK(t, h.createModelRouter, routerBody("support", "Support"), nil)
