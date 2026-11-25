@@ -179,6 +179,9 @@ func (s *Server) ServeSSEMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	for _, notification := range res.Notifications {
+		s.deliverRaw(sessionID, notification)
+	}
 	s.deliver(sessionID, res.Response)
 	w.WriteHeader(http.StatusAccepted)
 }

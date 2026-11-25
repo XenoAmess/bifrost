@@ -221,11 +221,34 @@ func (s *Server) writeHandled(w http.ResponseWriter, res handleResult, f Faults,
 		return
 	}
 
+	if len(res.Notifications) > 0 {
+		writeStream(w, res.Notifications, res.Response)
+		return
+	}
 	if modern {
 		writeModern(w, res.Response)
 		return
 	}
 	writeJSON(w, http.StatusOK, res.Response)
+}
+
+// writeStream answers as an SSE stream: the notifications in order, then resp.
+func writeStream(w http.ResponseWriter, notifications [][]byte, resp *response) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.WriteHeader(http.StatusOK)
+	payload, err := json.Marshal(resp)
+	if err != nil {
+		return
+	}
+	for _, msg := range append(notifications, payload) {
+		if _, err := fmt.Fprintf(w, "event: message\ndata: %s\n\n", msg); err != nil {
+			return
+		}
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+	}
 }
 
 // serveDelete ends the named session. Clients use this to shut down cleanly,

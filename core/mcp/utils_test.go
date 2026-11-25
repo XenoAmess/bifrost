@@ -1011,3 +1011,44 @@ func TestRoundTripState(t *testing.T) {
 	assert.Equal(t, RoundTripID("req-2"), CallRoundTripID(ctx), "a first round's id comes from its request")
 	assert.Equal(t, id, CallRoundTripID(context.WithValue(ctx, schemas.BifrostContextKeyMCPRoundTripID, id)), "a retry keeps the id it carried")
 }
+
+// A call asks the upstream for progress only when ctx carries a reporter, under a fresh token whose
+// progress reaches that reporter until the call ends, keeping any other _meta the call had.
+func TestWithProgressToken(t *testing.T) {
+	call := mcp.CallToolRequest{}
+	call.Params.Meta = &mcp.Meta{AdditionalFields: map[string]any{"trace": "t1"}}
+
+	unchanged, stop := withProgressToken(context.Background(), call)
+	stop()
+	assert.Same(t, call.Params.Meta, unchanged.Params.Meta)
+
+	type step struct {
+		progress float64
+		total    *float64
+		message  string
+	}
+	var reported []step
+	ctx := context.WithValue(context.Background(), schemas.BifrostContextKeyMCPProgressReporter,
+		ProgressReporter(func(progress float64, total *float64, message string) {
+			reported = append(reported, step{progress, total, message})
+		}))
+	sent, stop := withProgressToken(ctx, call)
+	token, ok := sent.Params.Meta.ProgressToken.(string)
+	require.True(t, ok)
+	assert.NotEmpty(t, token)
+	assert.Equal(t, "t1", sent.Params.Meta.AdditionalFields["trace"])
+	assert.Nil(t, call.Params.Meta.ProgressToken, "the caller's request is not modified")
+
+	total := float64(2)
+	deliverProgress(map[string]any{"progressToken": token, "progress": float64(1), "total": total, "message": "half"})
+	deliverProgress(map[string]any{"progressToken": token, "progress": float64(2)})
+	deliverProgress(map[string]any{"progressToken": "another-call", "progress": float64(1)})
+	deliverProgress(map[string]any{"progressToken": token, "progress": "1"})
+	assert.Equal(t, []step{{1, &total, "half"}, {2, nil, ""}}, reported, "only this call's well-formed progress is reported")
+
+	stop()
+	deliverProgress(map[string]any{"progressToken": token, "progress": float64(3)})
+	assert.Len(t, reported, 2, "nothing is reported once the call has ended")
+	_, ok = progressRoutes.Load(token)
+	assert.False(t, ok)
+}
