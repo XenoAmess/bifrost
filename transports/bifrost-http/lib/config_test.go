@@ -22378,6 +22378,9 @@ func assertDefaultClientConfigValues(t *testing.T, cc configstore.ClientConfig) 
 	require.Equal(t, 10, cc.MCPAgentDepth, "MCPAgentDepth should default to 10")
 	require.Equal(t, 30, cc.MCPToolExecutionTimeout, "MCPToolExecutionTimeout should default to 30")
 	require.Equal(t, false, cc.MCPEnableTempTokenAuth, "MCPEnableTempTokenAuth should default to false")
+	// 0 is not a valid retention (PUT /api/config refuses anything below 1), so an install that
+	// never set one holds the default, not 0.
+	require.Equal(t, 365, cc.LogRetentionDays, "LogRetentionDays should default to 365")
 	require.Equal(t, false, cc.Compat.ConvertTextToChat, "Compat.ConvertTextToChat should default to false")
 	require.Equal(t, false, cc.Compat.ConvertChatToResponses, "Compat.ConvertChatToResponses should default to false")
 	require.Equal(t, false, cc.Compat.ShouldDropParams, "Compat.ShouldDropParams should default to false")
@@ -22912,6 +22915,13 @@ func TestLoadConfig_DefaultClientConfig_Values(t *testing.T) {
 	defer config.Close(ctx)
 
 	assertDefaultClientConfigValues(t, *config.ClientConfig)
+
+	// GET /api/config?from_db=true answers from the stored row, and a client that sends it back
+	// unchanged must pass the PUT's minimum of 1.
+	stored, err := config.ConfigStore.GetClientConfig(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	require.Equal(t, 365, stored.LogRetentionDays, "the stored LogRetentionDays should be the default")
 }
 
 // TestLoadConfig_PartialClientConfig_DefaultsFillGaps tests that missing client fields get defaults
@@ -22944,6 +22954,14 @@ func TestLoadConfig_PartialClientConfig_DefaultsFillGaps(t *testing.T) {
 	// Verify zero-value fields get defaults
 	require.Equal(t, DefaultClientConfig.MaxRequestBodySizeMB, config.ClientConfig.MaxRequestBodySizeMB,
 		"MaxRequestBodySizeMB should get default when zero in file")
+	require.Equal(t, 365, config.ClientConfig.LogRetentionDays,
+		"LogRetentionDays should get default when zero in file")
+	// The stored row is what GET /api/config?from_db=true answers with. It must hold a value
+	// PUT /api/config accepts, so a client can send the config back unchanged.
+	stored, err := config.ConfigStore.GetClientConfig(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	require.Equal(t, 365, stored.LogRetentionDays, "the stored LogRetentionDays should be the default")
 }
 
 // =============================================================================

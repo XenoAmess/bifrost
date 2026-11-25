@@ -882,6 +882,7 @@ var DefaultClientConfig = configstore.ClientConfig{
 	AllowedHeaders:                  []string{},
 	WhitelistedRoutes:               []string{},
 	MaxRequestBodySizeMB:            100,
+	LogRetentionDays:                365,
 	MCPAgentDepth:                   10,
 	MCPToolExecutionTimeout:         30,
 	MCPCodeModeBindingLevel:         string(schemas.CodeModeBindingLevelServer),
@@ -1578,6 +1579,12 @@ func applyClientConfigDefaults(cc *configstore.ClientConfig) {
 	}
 	if cc.MaxRequestBodySizeMB == 0 {
 		cc.MaxRequestBodySizeMB = DefaultClientConfig.MaxRequestBodySizeMB
+	}
+	// A retention below 1 is not a valid setting: PUT /api/config refuses it. A client block
+	// that leaves it out would otherwise hold 0, and the config read back from the gateway could
+	// not be sent back unchanged.
+	if cc.LogRetentionDays < 1 {
+		cc.LogRetentionDays = DefaultClientConfig.LogRetentionDays
 	}
 	if cc.MCPAgentDepth == 0 {
 		cc.MCPAgentDepth = DefaultClientConfig.MCPAgentDepth
