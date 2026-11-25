@@ -1439,6 +1439,7 @@ type LoggerPlugin struct {
 	batchSweeperCancel           context.CancelFunc             // Cancels the batch accounting sweeper, when enabled
 	videoSweeperCancel           context.CancelFunc             // Cancels the video accounting sweeper, when enabled
 	interactionSweeperCancel     context.CancelFunc             // Cancels the interaction accounting sweeper, when enabled
+	responseSweeperCancel        context.CancelFunc             // Cancels the background response accounting sweeper, when enabled
 	batchWriterDone              chan struct{}                  // Closed by batchWriter on exit; receiving from it transfers writeQueue ownership to Cleanup
 	recoveredBatch               []*writeQueueEntry             // batchWriter parks its in-memory batch here before exiting; safe to read after batchWriterDone closes (happens-before)
 	userAgentMappings            atomic.Value                   // []compiledUserAgentMapping, read from request hot paths
@@ -1798,6 +1799,9 @@ func (p *LoggerPlugin) StartBatchAccountingSweeper(fetcher jobaccounting.BatchRe
 	}
 	p.batchSweeperCancel = cancel
 	usageReporter := p.batchUsageReporter
+	// Counted under the lock: Cleanup sets closed and reaches wg.Wait() under the same
+	// lock, so the Add can never land behind the Wait.
+	p.wg.Add(1)
 	p.mu.Unlock()
 	claimedBy := p.batchRunnerID("batch-sweeper")
 	sweeper := jobaccounting.NewBatchSweeper(p.batchStore, p.store, p.pricingManager, fetcher, p, usageReporter, jobaccounting.SweeperConfig{
@@ -1806,7 +1810,6 @@ func (p *LoggerPlugin) StartBatchAccountingSweeper(fetcher jobaccounting.BatchRe
 		KVStore:   kvStore,
 		Logger:    p.logger,
 	})
-	p.wg.Add(1)
 	go func() {
 		defer p.wg.Done()
 		sweeper.Run(ctx)
@@ -1842,6 +1845,9 @@ func (p *LoggerPlugin) StartVideoAccountingSweeper(retriever jobaccounting.Video
 	}
 	p.videoSweeperCancel = cancel
 	usageReporter := p.batchUsageReporter
+	// Counted under the lock: Cleanup sets closed and reaches wg.Wait() under the same
+	// lock, so the Add can never land behind the Wait.
+	p.wg.Add(1)
 	p.mu.Unlock()
 	sweeper := jobaccounting.NewVideoSweeper(p.batchStore, p.store, p.pricingManager, retriever, p, usageReporter, jobaccounting.SweeperConfig{
 		Interval:  interval,
@@ -1849,7 +1855,6 @@ func (p *LoggerPlugin) StartVideoAccountingSweeper(retriever jobaccounting.Video
 		KVStore:   kvStore,
 		Logger:    p.logger,
 	})
-	p.wg.Add(1)
 	go func() {
 		defer p.wg.Done()
 		sweeper.Run(ctx)
@@ -1884,6 +1889,9 @@ func (p *LoggerPlugin) StartInteractionAccountingSweeper(poller jobaccounting.In
 	}
 	p.interactionSweeperCancel = cancel
 	usageReporter := p.batchUsageReporter
+	// Counted under the lock: Cleanup sets closed and reaches wg.Wait() under the same
+	// lock, so the Add can never land behind the Wait.
+	p.wg.Add(1)
 	p.mu.Unlock()
 	sweeper := jobaccounting.NewInteractionSweeper(p.batchStore, p.store, p.pricingManager, poller, p, usageReporter, jobaccounting.SweeperConfig{
 		Interval:  interval,
@@ -1891,7 +1899,50 @@ func (p *LoggerPlugin) StartInteractionAccountingSweeper(poller jobaccounting.In
 		KVStore:   kvStore,
 		Logger:    p.logger,
 	})
+	go func() {
+		defer p.wg.Done()
+		sweeper.Run(ctx)
+	}()
+	return cancel
+}
+
+// StartResponseAccountingSweeper runs the background response sweeper, which settles the responses
+// no client polled to the end. It is its own sweeper for the same reason the other kinds are: it
+// reads through its own client, and each kind's rows are only ever handed to its own settler.
+func (p *LoggerPlugin) StartResponseAccountingSweeper(poller jobaccounting.ResponsePoller, interval time.Duration, kvStore schemas.KVStore) context.CancelFunc {
+	if poller == nil || p.store == nil || p.batchStore == nil || p.pricingManager == nil {
+		if p.logger != nil {
+			p.logger.Warn("response accounting sweeper not started: missing poller, store, job store, or pricing manager")
+		}
+		return func() {}
+	}
+	ctx, cancel := context.WithCancel(p.ctx)
+	p.mu.Lock()
+	// Same shutdown race as the batch sweeper: Cleanup sets closed and cancels under
+	// this lock before reaching wg.Wait().
+	if p.closed.Load() {
+		p.mu.Unlock()
+		cancel()
+		if p.logger != nil {
+			p.logger.Warn("response accounting sweeper not started: logging plugin is shutting down")
+		}
+		return func() {}
+	}
+	if p.responseSweeperCancel != nil {
+		p.responseSweeperCancel()
+	}
+	p.responseSweeperCancel = cancel
+	usageReporter := p.batchUsageReporter
+	// Counted under the lock: Cleanup sets closed and reaches wg.Wait() under the same
+	// lock, so the Add can never land behind the Wait.
 	p.wg.Add(1)
+	p.mu.Unlock()
+	sweeper := jobaccounting.NewResponseSweeper(p.batchStore, p.store, p.pricingManager, poller, p, usageReporter, jobaccounting.SweeperConfig{
+		Interval:  interval,
+		ClaimedBy: p.batchRunnerID("response-sweeper"),
+		KVStore:   kvStore,
+		Logger:    p.logger,
+	})
 	go func() {
 		defer p.wg.Done()
 		sweeper.Run(ctx)
@@ -2725,6 +2776,11 @@ func (p *LoggerPlugin) PostLLMHook(ctx *schemas.BifrostContext, result *schemas.
 				p.handleInteractionJob(ctx, entry, result)
 			}
 		}
+		// A streamed retrieve ends on the event that carries the stored response as it now stands.
+		if bifrostErr == nil && isFinalChunk && requestType == schemas.ResponsesRetrieveStreamRequest &&
+			result != nil && result.ResponsesStreamResponse != nil {
+			p.handleResponseJob(ctx, entry, requestType, result.ResponsesStreamResponse.Response)
+		}
 		applyLargePayloadPreviewsToEntry(ctx, entry, contentLoggingEnabled)
 		if tracer != nil && traceID != "" {
 			tracer.CleanupStreamAccumulator(traceID)
@@ -2818,6 +2874,9 @@ func (p *LoggerPlugin) PostLLMHook(ctx *schemas.BifrostContext, result *schemas.
 	}
 	if bifrostErr == nil && result != nil && result.PassthroughResponse != nil && result.PassthroughResponse.ProviderJob != nil {
 		p.handleInteractionJob(ctx, entry, result)
+	}
+	if bifrostErr == nil && result != nil && result.ResponsesResponse != nil && isResponseJobRequestType(requestType) {
+		p.handleResponseJob(ctx, entry, requestType, result.ResponsesResponse)
 	}
 
 	// Pre-apply denormalized fields for WebSocket callback enrichment
@@ -2921,6 +2980,10 @@ func (p *LoggerPlugin) Cleanup() error {
 		if p.interactionSweeperCancel != nil {
 			p.interactionSweeperCancel()
 			p.interactionSweeperCancel = nil
+		}
+		if p.responseSweeperCancel != nil {
+			p.responseSweeperCancel()
+			p.responseSweeperCancel = nil
 		}
 		p.mu.Unlock()
 		// After closed is set, so no new row can be held behind this pass, and
