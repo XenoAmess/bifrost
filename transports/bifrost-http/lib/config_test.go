@@ -22138,6 +22138,42 @@ func TestRemoveProvider_NotFound(t *testing.T) {
 	}
 }
 
+func TestRemoveProvider_NoStoreRepeatedDelete(t *testing.T) {
+	initTestLogger()
+	cfg := &Config{Providers: map[schemas.ModelProvider]configstore.ProviderConfig{"test-provider": {}}}
+	if err := cfg.RemoveProvider(context.Background(), "test-provider"); err != nil {
+		t.Fatalf("first delete: %v", err)
+	}
+	if err := cfg.RemoveProvider(context.Background(), "test-provider"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("repeated delete: err = %v, want ErrNotFound", err)
+	}
+	// A cluster peer replaying a delete skips the store, and an absent provider is not its error.
+	peer := context.WithValue(context.Background(), schemas.BifrostContextKeySkipDBUpdate, true)
+	for name, store := range map[string]configstore.ConfigStore{"no store": nil, "with store": NewMockConfigStore()} {
+		cfg.ConfigStore = store
+		if err := cfg.RemoveProvider(peer, "test-provider"); err != nil {
+			t.Fatalf("peer delete %s: %v", name, err)
+		}
+	}
+}
+
+func TestRemoveProvider_StoreRowGoneStillClearsMemory(t *testing.T) {
+	initTestLogger()
+	cfg := &Config{
+		Providers:   map[schemas.ModelProvider]configstore.ProviderConfig{"test-provider": {}},
+		ConfigStore: &mockConfigStoreDeleteProvider{MockConfigStore: *NewMockConfigStore(), deleteProviderErr: configstore.ErrNotFound},
+	}
+
+	for _, attempt := range []string{"row gone, still in memory", "gone from both"} {
+		if err := cfg.RemoveProvider(context.Background(), "test-provider"); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("%s: err = %v, want ErrNotFound", attempt, err)
+		}
+		if _, exists := cfg.Providers["test-provider"]; exists {
+			t.Fatalf("%s: provider should be removed from memory", attempt)
+		}
+	}
+}
+
 func TestRemoveProvider_DBError_DoesNotRemoveFromMemory(t *testing.T) {
 	initTestLogger()
 	mockStore := &mockConfigStoreDeleteProvider{

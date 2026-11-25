@@ -3538,3 +3538,46 @@ func TestRemoveProviderWithoutGovernanceOrCatalog(t *testing.T) {
 		})
 	}
 }
+
+// deleteProviderErrStore answers every provider delete with err.
+type deleteProviderErrStore struct {
+	configstore.ConfigStore
+	err error
+}
+
+func (s deleteProviderErrStore) DeleteProvider(context.Context, schemas.ModelProvider, ...*gorm.DB) error {
+	return s.err
+}
+
+// TestRemoveProviderStoreErrors pins that an already deleted provider is lib.ErrNotFound and any other store error is not.
+func TestRemoveProviderStoreErrors(t *testing.T) {
+	prevLogger := logger
+	logger = noopTestLogger{}
+	defer func() { logger = prevLogger }()
+	lib.SetLogger(noopTestLogger{})
+
+	for _, tc := range []struct {
+		name     string
+		err      error
+		notFound bool
+	}{
+		{"already deleted", configstore.ErrNotFound, true},
+		{"database error", errors.New("connection refused"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &lib.Config{Providers: map[schemas.ModelProvider]configstore.ProviderConfig{}, ConfigStore: deleteProviderErrStore{err: tc.err}}
+			client, err := bifrost.Init(context.Background(), schemas.BifrostConfig{
+				Account: lib.NewBaseAccount(cfg),
+				Logger:  bifrost.NewDefaultLogger(schemas.LogLevelError),
+			})
+			require.NoError(t, err)
+			defer client.Shutdown()
+
+			server := &BifrostHTTPServer{Config: cfg, Client: client, Ctx: schemas.NewBifrostContext(context.Background(), time.Time{})}
+			err = server.RemoveProvider(context.Background(), "gone-provider")
+			require.Error(t, err)
+			require.Equal(t, tc.notFound, errors.Is(err, lib.ErrNotFound))
+			require.False(t, lib.IsSavedNotApplied(err))
+		})
+	}
+}

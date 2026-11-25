@@ -10060,7 +10060,9 @@ func (c *Config) RemoveProviderKey(ctx context.Context, provider schemas.ModelPr
 	return nil
 }
 
-// RemoveProvider removes a provider configuration from memory.
+// RemoveProvider removes a provider configuration from the store and memory. When the store
+// holds no such provider it still clears memory, then returns ErrNotFound. Without a store, a
+// provider absent from memory is ErrNotFound too.
 func (c *Config) RemoveProvider(ctx context.Context, provider schemas.ModelProvider) error {
 	c.Mu.Lock()
 	defer c.Mu.Unlock()
@@ -10071,18 +10073,25 @@ func (c *Config) RemoveProvider(ctx context.Context, provider schemas.ModelProvi
 			skipDBUpdate = skip
 		}
 	}
+	var notFound error
 	if c.ConfigStore != nil && !skipDBUpdate {
 		if err := c.ConfigStore.DeleteProvider(ctx, provider); err != nil {
-			return fmt.Errorf("failed to delete provider config from store: %w", err)
+			if !errors.Is(err, configstore.ErrNotFound) {
+				return fmt.Errorf("failed to delete provider config from store: %w", err)
+			}
+			notFound = ErrNotFound
 		}
 	}
 	if _, exists := c.Providers[provider]; !exists {
-		return nil
+		if c.ConfigStore == nil && !skipDBUpdate {
+			return ErrNotFound // memory is the only copy, so nothing was deleted
+		}
+		return notFound
 	}
 	delete(c.Providers, provider)
 	schemas.UnregisterKnownProvider(provider)
 	logger.Info("Removed provider: %s", provider)
-	return nil
+	return notFound
 }
 
 // GetAllKeys returns the redacted keys

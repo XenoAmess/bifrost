@@ -554,7 +554,7 @@ func (h *ProviderHandler) addProvider(ctx *fasthttp.RequestCtx) {
 		// Configuration first: while it is stored, a request can lazily prepare a stopped provider again.
 		rollbackErr := h.inMemoryStore.RemoveProvider(context.Background(), payload.Provider)
 		h.stopRuntimeProvider(payload.Provider)
-		if rollbackErr != nil {
+		if rollbackErr != nil && !errors.Is(rollbackErr, lib.ErrNotFound) {
 			logger.Error("Failed to rollback provider %s after reload failure: %v", payload.Provider, rollbackErr)
 			// The stored config survived the failed rollback, so the add is real.
 			lib.RecordAuditChange(ctx, "provider.created", "provider", string(payload.Provider), string(payload.Provider), nil, auditProviderConfig(config.Redacted()))
@@ -877,7 +877,8 @@ func (h *ProviderHandler) deleteProvider(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	if err := h.modelsManager.RemoveProvider(ctx, provider); err != nil {
+	err = h.modelsManager.RemoveProvider(ctx, provider)
+	if err != nil && !errors.Is(err, lib.ErrNotFound) {
 		if lib.IsSavedNotApplied(err) {
 			logger.Error("Provider %s deleted but runtime cleanup failed: %v", provider, err)
 			lib.RecordAuditChange(ctx, "provider.deleted", "provider", string(provider), string(provider), auditProviderConfig(existing), nil)
@@ -888,7 +889,9 @@ func (h *ProviderHandler) deleteProvider(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("Failed to delete provider: %v", err))
 		return
 	}
-	lib.RecordAuditChange(ctx, "provider.deleted", "provider", string(provider), string(provider), auditProviderConfig(existing), nil)
+	if err == nil { // ErrNotFound: already deleted, so this request changed nothing
+		lib.RecordAuditChange(ctx, "provider.deleted", "provider", string(provider), string(provider), auditProviderConfig(existing), nil)
+	}
 
 	response := ProviderResponse{
 		Name: provider,

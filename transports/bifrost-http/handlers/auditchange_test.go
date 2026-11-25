@@ -883,6 +883,7 @@ func TestCommitPoint_DeleteProvider(t *testing.T) {
 		recorded  bool
 	}{
 		{"success", nil, fasthttp.StatusOK, true},
+		{"already deleted", lib.ErrNotFound, fasthttp.StatusOK, false},
 		{"nothing deleted", errors.New("client refused the removal"), fasthttp.StatusInternalServerError, false},
 		{"deleted, cleanup failed", &lib.SavedNotAppliedError{Err: errors.New("pricing manager not found")}, fasthttp.StatusInternalServerError, true},
 	} {
