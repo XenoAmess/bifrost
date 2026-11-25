@@ -30,6 +30,12 @@ type Config struct {
 	URL                string
 	ModelParametersURL string
 	SyncInterval       time.Duration
+	// URLPublicOnly and ModelParametersURLPublicOnly are set for a URL that was
+	// saved through the API. Such a URL was accepted under the public-address
+	// rule, so every sync fetches it under that rule too. False is the
+	// config.json rule: private-network hosts and file:// are allowed.
+	URLPublicOnly                bool
+	ModelParametersURLPublicOnly bool
 }
 
 func (c Config) resolved() Config {
@@ -110,6 +116,9 @@ type Store struct {
 	modelParametersURL string
 	syncInterval       time.Duration
 	lastSyncedAt       time.Time
+	// Whether url / modelParametersURL was saved through the API (see Config).
+	urlPublicOnly       bool
+	paramsURLPublicOnly bool
 }
 
 // New constructs a Store with the given config. The store is empty; callers
@@ -129,6 +138,8 @@ func New(configStore configstore.ConfigStore, logger schemas.Logger, cfg Config)
 		url:                    cfg.URL,
 		modelParametersURL:     cfg.ModelParametersURL,
 		syncInterval:           cfg.SyncInterval,
+		urlPublicOnly:          cfg.URLPublicOnly,
+		paramsURLPublicOnly:    cfg.ModelParametersURLPublicOnly,
 	}
 }
 
@@ -140,6 +151,8 @@ func (s *Store) UpdateSyncConfig(cfg Config) {
 	s.url = cfg.URL
 	s.modelParametersURL = cfg.ModelParametersURL
 	s.syncInterval = cfg.SyncInterval
+	s.urlPublicOnly = cfg.URLPublicOnly
+	s.paramsURLPublicOnly = cfg.ModelParametersURLPublicOnly
 	s.syncCfgMu.Unlock()
 }
 
@@ -155,6 +168,21 @@ func (s *Store) ModelParametersURL() string {
 	s.syncCfgMu.RLock()
 	defer s.syncCfgMu.RUnlock()
 	return s.modelParametersURL
+}
+
+// URLPublicOnly reports whether the pricing URL was saved through the API and
+// is therefore fetched under the public-address rule.
+func (s *Store) URLPublicOnly() bool {
+	s.syncCfgMu.RLock()
+	defer s.syncCfgMu.RUnlock()
+	return s.urlPublicOnly
+}
+
+// ModelParametersURLPublicOnly is URLPublicOnly for the model-parameters URL.
+func (s *Store) ModelParametersURLPublicOnly() bool {
+	s.syncCfgMu.RLock()
+	defer s.syncCfgMu.RUnlock()
+	return s.paramsURLPublicOnly
 }
 
 // SyncInterval returns the minimum elapsed time between background syncs.

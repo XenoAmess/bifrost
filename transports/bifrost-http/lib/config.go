@@ -7094,6 +7094,15 @@ func buildMCPPricingDataFromConfig(ctx context.Context, configData *ConfigData) 
 // never passed through the env lookup — partial/embedded references such as
 // "https://host/env.PATH" are treated as plain strings without any expansion.
 //
+// Each of pricing_url, model_parameters_url and mcp_library_url also carries a
+// stored public-only mark (TableFrameworkConfig.*PublicOnly). The management API
+// sets it when it saves a changed URL, because the API accepts only a public
+// http(s) address and the sync must fetch the URL under that same rule. Here the
+// mark follows the value: a URL taken from the DB keeps the DB's mark, so a
+// restart does not loosen an API-saved URL; a URL taken from config.json or the
+// built-in default is unmarked, so private-network mirrors and file:// keep
+// working.
+//
 // NOTE on pricingSyncInterval naming:
 // Despite its name, pricingSyncInterval is NOT a scheduling frequency.
 // It defines the minimum allowed elapsed time between sync executions.
@@ -7294,6 +7303,8 @@ func ResolveFrameworkPricingConfig(
 
 	needsDBUpdate := false
 	configID := uint(0)
+	// Set only where a URL is taken from the DB below; see the function comment.
+	pricingURLPublicOnly, modelParametersURLPublicOnly, mcpLibraryURLPublicOnly := false, false, false
 
 	// Hash the file-resolved values; skip if nothing valid survived Phase 1.
 	fileHash := ""
@@ -7340,6 +7351,7 @@ func ResolveFrameworkPricingConfig(
 				needsDBUpdate = true
 			} else {
 				resolvedPricingURL = dbConfig.PricingURL
+				pricingURLPublicOnly = dbConfig.PricingURLPublicOnly
 			}
 		} else if !skipURLBackfill {
 			needsDBUpdate = true
@@ -7350,6 +7362,7 @@ func ResolveFrameworkPricingConfig(
 				needsDBUpdate = true
 			} else {
 				resolvedModelParametersURL = dbConfig.ModelParametersURL
+				modelParametersURLPublicOnly = dbConfig.ModelParametersURLPublicOnly
 			}
 		} else if !skipModelParamsURLBackfill {
 			needsDBUpdate = true
@@ -7387,6 +7400,7 @@ func ResolveFrameworkPricingConfig(
 					needsDBUpdate = true
 				} else {
 					resolvedMCPLibraryURL = &trimmed
+					mcpLibraryURLPublicOnly = dbConfig.MCPLibraryURLPublicOnly
 				}
 			} else if !skipMCPLibraryURLBackfill {
 				needsDBUpdate = true
@@ -7521,6 +7535,10 @@ func ResolveFrameworkPricingConfig(
 		LiveModelsSyncInterval: resolvedLiveModelsSyncInterval,
 		OpenAPIURL:             resolvedOpenAPIURL,
 		ConfigHash:             persistedHash,
+
+		PricingURLPublicOnly:         pricingURLPublicOnly,
+		ModelParametersURLPublicOnly: modelParametersURLPublicOnly,
+		MCPLibraryURLPublicOnly:      mcpLibraryURLPublicOnly,
 	}, &modelcatalog.Config{
 		PricingURL:             resolvedPricingURL,
 		PricingSyncInterval:    resolvedSyncSeconds,
@@ -7529,6 +7547,10 @@ func ResolveFrameworkPricingConfig(
 		MCPLibrarySyncInterval: resolvedMCPLibrarySyncInterval,
 		LiveModelsSyncInterval: resolvedLiveModelsSyncInterval,
 		OpenAPIURL:             resolvedOpenAPIURL,
+
+		PricingURLPublicOnly:         pricingURLPublicOnly,
+		ModelParametersURLPublicOnly: modelParametersURLPublicOnly,
+		MCPLibraryURLPublicOnly:      mcpLibraryURLPublicOnly,
 	}, needsDBUpdate
 }
 
